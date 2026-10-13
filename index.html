@@ -566,11 +566,12 @@
   <section class="row-gap" id="loginsSection"></section>
 </div>
 
-<footer class="note">Ekebol QLD schedule. Everything you enter is saved in this browser on this device only (nothing is sent to a server). Use Export config to back up or move a setup.</footer>
+<footer class="note">Ekebol QLD schedule. On the website, signed-in users share one schedule that syncs online; opened as a file on a PC it stays on that device only. Use Export config to back up or move a setup.</footer>
 </div>
 
 <div id="printArea"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.114.0/dist/umd/supabase.js"></script>
 <script>
 (function(){
   const DOW_ORDER = [1,2,3,4,5,6,0]; // Mon..Sun
@@ -1480,10 +1481,14 @@
   // stays the source of truth for instant, offline-safe reads/writes (save() above still always writes there
   // first) — this layer just keeps that local copy and the shared remote copy converging, last-write-wins.
   // Falls back to local-only silently if the SDK didn't load or the keys aren't set.
-  const SUPABASE_URL = ''; // Ekebol copy: cloud sync OFF so it can never touch the main Southern Spreaders data
-  const SUPABASE_ANON_KEY = '';
+  // Ekebol QLD's OWN Supabase project (separate from Southern Spreaders). The publishable key is designed to be public:
+  // what protects the data is the sign-in plus the row-level-security rules in supabase-setup.sql.
+  // Sync is only switched on when the page is served from a website (http/https). Opened straight from a file on a PC
+  // (file://) it stays local-only, so the local copy and its saved data keep working exactly as before.
+  const SUPABASE_URL = 'https://ekaogwffpositlukqshh.supabase.co';
+  const SUPABASE_ANON_KEY = 'sb_publishable_O-glgEJUZgyBF4YxF_1ZDA_wjaKs3Ny';
   const SUPABASE_STATE_ID = 'main';
-  const sb = (window.supabase && SUPABASE_URL && SUPABASE_ANON_KEY)
+  const sb = (location.protocol !== 'file:' && window.supabase && SUPABASE_URL && SUPABASE_ANON_KEY)
     ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
     : null;
 
