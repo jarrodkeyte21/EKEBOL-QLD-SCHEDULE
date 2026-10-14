@@ -1500,11 +1500,33 @@
   // data up and stomp on whatever's already shared, before we've even checked what's there.
   let syncReady = false;
 
-  function setSyncStatus(status){
+  // Turns a raw Supabase / network error into a plain-English reason, so a red "Sync error" says what to fix.
+  function explainSyncError(err){
+    const raw = String((err && (err.message || err.error_description || err.details)) || err || '').trim();
+    const low = raw.toLowerCase();
+    let hint = raw || 'unknown error';
+    if (low.includes('row-level security') || low.includes('permission denied') || (err && (err.code === '42501' || err.status === 403)))
+      hint = 'signed in, but this login has no role yet — run the manager SQL step in Supabase';
+    else if (low.includes('jwt') || low.includes('not authenticated') || (err && err.status === 401))
+      hint = 'your sign-in has expired — sign out and sign in again';
+    else if (low.includes('does not exist') || low.includes('could not find the table') || (err && err.code === 'PGRST205') || (err && err.code === '42P01'))
+      hint = 'the database tables are missing — run supabase-setup.sql in the Supabase SQL Editor';
+    else if (low.includes('failed to fetch') || low.includes('networkerror') || low.includes('load failed'))
+      hint = 'cannot reach Supabase — check the internet connection';
+    return { hint, raw };
+  }
+  function setSyncStatus(status, err){
     const el = document.getElementById('syncStatus');
     if (!el) return;
     const labels = { offline: '⚪ Local only (no live sync)', syncing: '🔄 Syncing…', synced: '🟢 Synced', error: '🔴 Sync error — check connection' };
     el.textContent = labels[status] || '';
+    el.title = '';
+    if (status === 'error' && err){
+      const { hint, raw } = explainSyncError(err);
+      el.textContent = '🔴 Sync error — ' + hint;
+      el.title = raw;
+      try { console.error('Sync error:', err); } catch (e){}
+    }
   }
   if (!sb) setSyncStatus('offline');
 
@@ -1529,7 +1551,7 @@
       lastSyncedUpdatedAt = nowIso;
       setSyncStatus('synced');
     } catch (err) {
-      setSyncStatus('error');
+      setSyncStatus('error', err);
     }
   }
 
@@ -1558,7 +1580,7 @@
       setSyncStatus('synced');
       return false;
     } catch (err) {
-      setSyncStatus('error');
+      setSyncStatus('error', err);
       return false;
     }
   }
