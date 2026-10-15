@@ -990,7 +990,7 @@
       rows.forEach(r => {
         const d = Math.max(0, Math.min(365, Math.round(Number(r.days.value) || 0)));
         let a = r.arr.value || '';
-        if (a && isWeekendISO(a)){ a = nextWorkingISO(a); appToast('Deliveries cannot arrive on a weekend — ' + (state.tasks.find(t => t.id === r.id) || {}).name + ' moved to ' + fmtShort(parseISO(a))); }
+        if (a && isNonWorkingISO(a)){ const why = nonWorkingReason(a); a = nextWorkingISO(a); appToast('Deliveries cannot arrive on ' + why + ' — ' + ((state.tasks.find(t => t.id === r.id) || {}).name || 'task') + ' moved to ' + fmtShort(parseISO(a))); }
         if (r.cb.checked && (d > 0 || a)){ out[r.id] = d; outArr[r.id] = a; if (r.back.checked) done[r.id] = true; }
         else if (jobLevel(r.id)){ out[r.id] = 0; outArr[r.id] = ''; } // set on the job but in-house for this build
       });
@@ -1141,7 +1141,7 @@
     const preview = document.createElement('div'); preview.className = 'hint'; preview.style.minHeight = '1.4em';
     const showPreview = () => {
       let weekendNote = '';
-      if (inp.value && isWeekendISO(inp.value)){ inp.value = nextWorkingISO(inp.value); weekendNote = 'A build sheet can\'t be released on a weekend — moved to ' + fmtShort(parseISO(inp.value)) + '. '; }
+      if (inp.value && isNonWorkingISO(inp.value)){ const why = nonWorkingReason(inp.value); inp.value = nextWorkingISO(inp.value); weekendNote = 'A build sheet cannot be released on ' + why + ' — moved to ' + fmtShort(parseISO(inp.value)) + '. '; }
       if (!inp.value){ preview.textContent = ''; return; }
       const bsDays = Number(effectiveBuildData(raw).buildSheetLeadDays) || 0;
       const minOrder = toISO(addWorkingDays(parseISO(inp.value), bsDays));
@@ -1814,6 +1814,35 @@
     return (oldVal !== null && oldVal !== undefined && !isNaN(n) && n > 0) ? Math.max(1, Math.round(n / 8)) : null;
   }
 
+  // Moves any saved order date (pinned), hand-set build sheet release date or outsourced arrival date that falls on a
+  // weekend or a factory shutdown to the next working day, and records what moved so the Schedule tab can list it until it
+  // is dismissed. Auto order dates are worked out fresh each time, so they're skipped. Returns how many dates moved.
+  function moveDatesOffNonWorkingDays(){
+    if (!state.meta) state.meta = {};
+    const fixes = [];
+    const fixOne = (label, field, obj, key) => {
+      const v = obj[key];
+      if (v && typeof v === 'string' && isNonWorkingISO(v)){
+        const why = nonWorkingReason(v); const n = nextWorkingISO(v); obj[key] = n;
+        fixes.push(label + ' ' + field + ': ' + fmtShort(parseISO(v)) + ' (' + why + ') → ' + fmtShort(parseISO(n)));
+      }
+    };
+    (state.builds || []).forEach(b => {
+      const label = b.jobNumber || b.customer || 'a job';
+      if (b.orderDateAuto === false) fixOne(label, 'order date', b, 'orderDate');
+      fixOne(label, 'build sheet release', b, 'buildSheetManualDate');
+      if (b.outsourcedArrive) Object.keys(b.outsourcedArrive).forEach(k => fixOne(label, 'arrival date', b.outsourcedArrive, k));
+    });
+    (state.jobRecords || []).forEach(j => (j.tasks || []).forEach(t => fixOne(j.jobNumber || 'a job', (t.name || 'task') + ' arrival date', t, 'outsourcedArrive')));
+    if (fixes.length) state.meta.weekendFixNotice = (state.meta.weekendFixNotice || []).concat(fixes);
+    return fixes.length;
+  }
+  // After a shutdown is added or its dates change: move anything that now falls inside it, then refresh the schedule.
+  function applyNonWorkingFix(){
+    if (moveDatesOffNonWorkingDays()){ save(); renderWeekendNotice(); }
+    renderResults();
+  }
+
   function normalizeState(){
     // One-time clean-up: drop the three built-in sample builds (JB-1042/1043/1044, not linked to any Jobs-tab job)
     // from data saved before they were removed from the starter data. Runs once, so a job you add yourself later
@@ -1824,24 +1853,9 @@
       state.builds = (state.builds || []).filter(b => !(sampleKeys.has((b.jobNumber || '') + '|' + (b.customer || '')) && !b.jobRecordId && !b.templateId));
       state.meta.sampleBuildsRemoved = true;
     }
-    // Releases, orders and deliveries can't fall on a Saturday or Sunday. Any already saved on a weekend (order dates you
-    // pinned, hand-set build sheet release dates, outsourced arrival dates) move to the next working day, and a notice
-    // on the Schedule tab lists exactly what moved until you dismiss it. Auto order dates are worked out fresh, so skipped.
-    {
-      const fixes = [];
-      const fixOne = (label, field, obj, key) => {
-        const v = obj[key];
-        if (v && typeof v === 'string' && isWeekendISO(v)){ const n = nextWorkingISO(v); obj[key] = n; fixes.push(label + ' ' + field + ': ' + fmtShort(parseISO(v)) + ' → ' + fmtShort(parseISO(n))); }
-      };
-      (state.builds || []).forEach(b => {
-        const label = b.jobNumber || b.customer || 'a job';
-        if (b.orderDateAuto === false) fixOne(label, 'order date', b, 'orderDate');
-        fixOne(label, 'build sheet release', b, 'buildSheetManualDate');
-        if (b.outsourcedArrive) Object.keys(b.outsourcedArrive).forEach(k => fixOne(label, 'arrival date', b.outsourcedArrive, k));
-      });
-      (state.jobRecords || []).forEach(j => (j.tasks || []).forEach(t => fixOne(j.jobNumber || 'a job', (t.name || 'task') + ' arrival date', t, 'outsourcedArrive')));
-      if (fixes.length) state.meta.weekendFixNotice = (state.meta.weekendFixNotice || []).concat(fixes);
-    }
+    // Releases, orders and deliveries can't fall on a weekend or on a day the factory is shut (holiday / shutdown). Any
+    // already saved on such a day move to the next working day, and a notice on the Schedule tab lists exactly what moved.
+    moveDatesOffNonWorkingDays();
     if (!state.actuals) state.actuals = {};
     if (!state.cardOrder) state.cardOrder = {};
     if (!state.dayFinished) state.dayFinished = {};
@@ -2187,26 +2201,34 @@
   function parseISO(s){ const [y,m,d] = s.split('-').map(Number); return new Date(y, m-1, d); }
   function toISO(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
   function addDays(d,n){ const r = new Date(d); r.setDate(r.getDate()+n); return r; }
-  // Same as addDays but counts only Mon-Fri — weekends are skipped rather than counted toward n. Works
-  // backward for a negative n (skipping weekends the same way). Used for build-sheet lead time, which is
-  // drafting/office work that doesn't happen on weekends, unlike addDays' general-purpose calendar-day math.
+  // Same as addDays but counts only WORKING days — Mon-Fri, and not a day the factory is shut for a holiday / shutdown
+  // (Setup > Factory shutdowns). Those days are skipped rather than counted toward n; works backward for a negative n the
+  // same way. Used for build-sheet (engineering) lead time, which is office work that doesn't happen on a weekend or holiday.
   function addWorkingDays(d, n){
     const r = new Date(d);
     let remaining = Math.abs(n);
     const step = n < 0 ? -1 : 1;
-    while (remaining > 0){
+    let guard = 0;
+    while (remaining > 0 && guard++ < 4000){
       r.setDate(r.getDate() + step);
       const dow = r.getDay();
-      if (dow !== 0 && dow !== 6) remaining--;
+      if (dow !== 0 && dow !== 6 && !isShutdownDay(toISO(r))) remaining--;
     }
     return r;
   }
-  // Releases, orders and deliveries can't happen on a Saturday or Sunday. Dates typed in by hand move to the next working
-  // day (Monday); dates the app works out itself (a calculated release or order date) move back to the previous working day
-  // (Friday) so nothing is later than it needs to be.
+  // Releases (build sheets / engineering), orders and deliveries can't fall on a Saturday, Sunday or a day the factory is shut
+  // for a holiday. Dates typed in by hand move to the next working day; dates the app works out itself (a calculated release
+  // or order date) move back to the previous working day so nothing is later than it needs to be.
   function isWeekendISO(iso){ if (!iso) return false; const dow = parseISO(iso).getDay(); return dow === 0 || dow === 6; }
-  function nextWorkingISO(iso){ if (!iso) return iso; const d = parseISO(iso); while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1); return toISO(d); }
-  function prevWorkingISO(iso){ if (!iso) return iso; const d = parseISO(iso); while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() - 1); return toISO(d); }
+  function isNonWorkingISO(iso){ return !!iso && (isWeekendISO(iso) || isShutdownDay(iso)); }
+  // Why a date can't be used, for messages: "a weekend" or "the Christmas close-down".
+  function nonWorkingReason(iso){
+    if (isWeekendISO(iso)) return 'a weekend';
+    const s = shutdownOn(iso);
+    return s ? ('the ' + ((s.name || '').trim() || 'factory shutdown')) : 'a non-working day';
+  }
+  function nextWorkingISO(iso){ if (!iso) return iso; const d = parseISO(iso); let g = 0; while (isNonWorkingISO(toISO(d)) && g++ < 4000) d.setDate(d.getDate() + 1); return toISO(d); }
+  function prevWorkingISO(iso){ if (!iso) return iso; const d = parseISO(iso); let g = 0; while (isNonWorkingISO(toISO(d)) && g++ < 4000) d.setDate(d.getDate() - 1); return toISO(d); }
   let appToastTimer = null;
   function appToast(msg){
     let el = document.getElementById('appToast');
@@ -4048,7 +4070,7 @@
         const earliestOrder = nextWorkingISO(sheetOut ? todayISO : toISO(addWorkingDays(parseISO(todayISO), bsLead)));
         let newOrder = toISO(addDays(parseISO(freeRun.startDate), -lead));
         if (newOrder < earliestOrder) newOrder = earliestOrder;
-        if (isWeekendISO(newOrder)) newOrder = prevWorkingISO(newOrder); // never a Saturday / Sunday
+        if (isNonWorkingISO(newOrder)) newOrder = prevWorkingISO(newOrder); // never a weekend or a holiday / shutdown day
         const curOrder = raw.orderDate || b.orderHoldDate;
         if (!(newOrder < (b.orderDate || '9999'))) return;
         const sheetBy = sheetOut ? null : toISO(addWorkingDays(parseISO(newOrder), -bsLead));
@@ -4244,7 +4266,7 @@
     }
     el.innerHTML = '';
     const head = document.createElement('div'); head.style.cssText = 'display:flex;gap:10px;align-items:center;justify-content:space-between';
-    const t = document.createElement('b'); t.textContent = 'Releases, orders and deliveries can\'t fall on a weekend — ' + list.length + ' saved date' + (list.length === 1 ? '' : 's') + ' moved to the next working day:';
+    const t = document.createElement('b'); t.textContent = 'Releases, orders and deliveries cannot fall on a weekend or a shutdown — ' + list.length + ' saved date' + (list.length === 1 ? '' : 's') + ' moved to the next working day:';
     const ok = document.createElement('button'); ok.className = 'ghost'; ok.textContent = 'OK, dismiss';
     ok.addEventListener('click', () => { state.meta.weekendFixNotice = []; save(); renderWeekendNotice(); });
     head.appendChild(t); head.appendChild(ok); el.appendChild(head);
@@ -4391,8 +4413,8 @@
       const count = document.createElement('span'); count.className = 'hint'; count.style.margin = '0';
       const upd = () => { const n = shutdownDayCount(s); count.textContent = n ? n + ' day' + (n === 1 ? '' : 's') : ''; };
       upd();
-      from.addEventListener('change', () => { s.start = from.value; if (!s.end || s.end < s.start){ s.end = s.start; to.value = s.end; } upd(); save(); renderResults(); });
-      to.addEventListener('change', () => { s.end = to.value; if (s.start && s.end < s.start){ s.end = s.start; to.value = s.end; } upd(); save(); renderResults(); });
+      from.addEventListener('change', () => { s.start = from.value; if (!s.end || s.end < s.start){ s.end = s.start; to.value = s.end; } upd(); save(); applyNonWorkingFix(); });
+      to.addEventListener('change', () => { s.end = to.value; if (s.start && s.end < s.start){ s.end = s.start; to.value = s.end; } upd(); save(); applyNonWorkingFix(); });
       const lf = document.createElement('label'); lf.textContent = 'From'; lf.style.minWidth = '0';
       const lt = document.createElement('label'); lt.textContent = 'to'; lt.style.minWidth = '0';
       const del = document.createElement('button'); del.className = 'icon ghost'; del.textContent = '✕'; del.title = 'Remove this shutdown';
@@ -4600,7 +4622,7 @@
         : 'Date materials/parts need to be ordered. Leave blank for no lead-time wait.';
       if (b.orderDateAuto) orderInp.classList.add('auto-value');
       orderInp.addEventListener('change', () => {
-        let od = orderInp.value || ''; if (od && isWeekendISO(od)){ const fixed = nextWorkingISO(od); appToast('Orders cannot be placed on a weekend — moved to ' + fmtShort(parseISO(fixed))); od = fixed; }
+        let od = orderInp.value || ''; if (od && isNonWorkingISO(od)){ const why = nonWorkingReason(od); const fixed = nextWorkingISO(od); appToast('Orders cannot be placed on ' + why + ' — moved to ' + fmtShort(parseISO(fixed))); od = fixed; }
         b.orderDate = od; b.orderDateAuto = false;
         save(); renderBuildTable(); renderResults();
       });
@@ -10833,7 +10855,7 @@
         if (!t.taskRefId) arrInp.disabled = true;
         arrInp.addEventListener('click', (e) => e.stopPropagation());
         arrInp.addEventListener('change', () => {
-          if (arrInp.value && isWeekendISO(arrInp.value)){ arrInp.value = nextWorkingISO(arrInp.value); appToast('Deliveries cannot arrive on a weekend — moved to ' + fmtShort(parseISO(arrInp.value))); }
+          if (arrInp.value && isNonWorkingISO(arrInp.value)){ const why = nonWorkingReason(arrInp.value); arrInp.value = nextWorkingISO(arrInp.value); appToast('Deliveries cannot arrive on ' + why + ' — moved to ' + fmtShort(parseISO(arrInp.value))); }
           t.outsourcedArrive = arrInp.value || null;
           if (t.taskRefId && owner && owner.id) state.builds.forEach(bb => { if (bb.jobRecordId === owner.id && bb.outsourcedArrive) delete bb.outsourcedArrive[t.taskRefId]; });
           save();
