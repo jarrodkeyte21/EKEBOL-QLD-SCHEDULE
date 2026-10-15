@@ -493,6 +493,8 @@
       <button class="primary" id="btnAddBuild">+ Add build</button>
     </div>
   </section>
+
+  <section class="panel row-gap" id="poolMonthSection" data-collapse-key="poolmonth" style="display:none"></section>
 </div>
 
 <div id="page-setup" style="display:none">
@@ -4285,7 +4287,7 @@
     const fold = document.getElementById('btnFoldTools');
     if (fold) fold.addEventListener('click', () => { ['move', 'ask', 'suggest', 'builds'].forEach(k => { schedUI.collapsed[k] = true; }); saveSchedUI(); applyAllCollapsibles(); });
     const unfold = document.getElementById('btnUnfoldAll');
-    if (unfold) unfold.addEventListener('click', () => { ['move', 'ask', 'suggest', 'builds', 'summary', 'chart'].forEach(k => { schedUI.collapsed[k] = false; }); saveSchedUI(); applyAllCollapsibles(); });
+    if (unfold) unfold.addEventListener('click', () => { ['move', 'ask', 'suggest', 'builds', 'summary', 'chart', 'poolmonth'].forEach(k => { schedUI.collapsed[k] = false; }); saveSchedUI(); applyAllCollapsibles(); });
     // Panels are rebuilt whenever the schedule re-renders; re-apply the fold state (and heading arrows) after each rebuild.
     const page = document.getElementById('page-schedule');
     if (page && typeof MutationObserver !== 'undefined'){
@@ -4294,6 +4296,85 @@
         .observe(page, { childList: true, subtree: true });
     }
     applyAllCollapsibles();
+  }
+
+  // ---------- Labour pool use by month (bottom of the Schedule tab): for each labour pool and each month that has scheduled
+  // work, the hours booked as a % of the pool's capacity for the WHOLE month. Weekends, holidays and shutdown days have no
+  // capacity, so they don't count against a pool. Hover a figure for the hours behind it. ----------
+  function renderPoolMonthPanel(dailyPoolUsage){
+    const el = document.getElementById('poolMonthSection');
+    if (!el) return;
+    el.innerHTML = '';
+    if (!dailyPoolUsage || !state.pools.length) { el.style.display = 'none'; return; }
+    // booked hours per pool per month, from the schedule
+    const usedBy = {}; // 'YYYY-MM' -> { poolId: hours }
+    dailyPoolUsage.forEach(d => {
+      const k = d.date.slice(0, 7);
+      const m = usedBy[k] = usedBy[k] || {};
+      state.pools.forEach(p => { m[p.id] = (m[p.id] || 0) + (Number(d.usage && d.usage[p.id]) || 0); });
+    });
+    const keys = Object.keys(usedBy).filter(k => Object.values(usedBy[k]).some(v => v > 0.01)).sort();
+    if (!keys.length){ el.style.display = 'none'; return; }
+    // every month from the first to the last one with scheduled work (so a quiet month in the middle still shows)
+    const months = [];
+    { let [y, m] = keys[0].split('-').map(Number); const [ly, lm] = keys[keys.length - 1].split('-').map(Number);
+      while ((y < ly || (y === ly && m <= lm)) && months.length < 24){ months.push(y + '-' + String(m).padStart(2, '0')); m++; if (m > 12){ m = 1; y++; } } }
+    const firstISO = dailyPoolUsage[0].date; // the first month is counted from the day the schedule starts
+    const capacityOf = (poolId, key) => {
+      const pool = state.pools.find(p => p.id === poolId); if (!pool) return 0;
+      const [y, m] = key.split('-').map(Number); const days = new Date(y, m, 0).getDate(); let cap = 0;
+      for (let d = 1; d <= days; d++){
+        const iso = key + '-' + String(d).padStart(2, '0');
+        if (iso < firstISO) continue; // days before the schedule begins aren't part of it
+        cap += poolHoursOn(pool, iso);
+      }
+      return cap;
+    };
+    const labelOf = (key) => { const [y, m] = key.split('-').map(Number); return MONTH_NAMES[m - 1].slice(0, 3) + ' ' + y; };
+    const h2 = document.createElement('h2'); h2.textContent = 'Labour pool use by month';
+    const hint = document.createElement('div'); hint.className = 'hint';
+    hint.textContent = 'Booked hours as a % of each labour pool\'s capacity for the whole month. Weekends, holidays and shutdown days have no capacity. Hover a figure for the hours.';
+    el.appendChild(h2); el.appendChild(hint);
+    const wrap = document.createElement('div'); wrap.className = 'scroll-x';
+    const table = document.createElement('table'); table.className = 'build-summary';
+    const head = document.createElement('tr');
+    const th0 = document.createElement('th'); th0.textContent = 'Labour pool'; head.appendChild(th0);
+    months.forEach(k => { const th = document.createElement('th'); th.textContent = labelOf(k); th.style.textAlign = 'right'; head.appendChild(th); });
+    const thead = document.createElement('thead'); thead.appendChild(head); table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    const colourFor = (pct) => pct > 100.5 ? 'var(--critical)' : pct >= 85 ? 'var(--warn)' : 'var(--accent)';
+    const cell = (used, cap) => {
+      const td = document.createElement('td'); td.style.cssText = 'text-align:right;min-width:78px;font-family:var(--font-mono)';
+      if (cap <= 0.01){ td.textContent = used > 0.01 ? Math.round(used) + 'h' : '—'; td.title = cap <= 0.01 ? 'No capacity this month' : ''; td.style.color = 'var(--ink-muted)'; return td; }
+      const pct = used / cap * 100;
+      const num = document.createElement('div'); num.textContent = Math.round(pct) + '%'; num.style.cssText = 'font-weight:700;color:' + colourFor(pct);
+      const bar = document.createElement('div'); bar.style.cssText = 'height:5px;border-radius:2px;background:var(--surface-2);margin-top:2px;position:relative;overflow:hidden';
+      const fill = document.createElement('div'); fill.style.cssText = 'position:absolute;inset:0 auto 0 0;width:' + Math.min(100, pct) + '%;background:' + colourFor(pct);
+      bar.appendChild(fill);
+      td.appendChild(num); td.appendChild(bar);
+      td.title = Math.round(used) + 'h booked of ' + Math.round(cap) + 'h capacity' + (pct > 100.5 ? ' — over capacity (overtime)' : '') + ' · ' + Math.max(0, Math.round(cap - used)) + 'h free';
+      return td;
+    };
+    state.pools.forEach(p => {
+      const tr = document.createElement('tr');
+      const nameTd = document.createElement('td'); nameTd.textContent = p.name; nameTd.style.fontWeight = '600'; tr.appendChild(nameTd);
+      months.forEach(k => tr.appendChild(cell((usedBy[k] && usedBy[k][p.id]) || 0, capacityOf(p.id, k))));
+      tbody.appendChild(tr);
+    });
+    // all pools together
+    const total = document.createElement('tr'); total.style.borderTop = '2px solid var(--line)';
+    const tn = document.createElement('td'); tn.textContent = 'All pools'; tn.style.fontWeight = '700'; total.appendChild(tn);
+    months.forEach(k => {
+      let used = 0, cap = 0;
+      state.pools.forEach(p => { used += (usedBy[k] && usedBy[k][p.id]) || 0; cap += capacityOf(p.id, k); });
+      total.appendChild(cell(used, cap));
+    });
+    tbody.appendChild(total);
+    table.appendChild(tbody); wrap.appendChild(table); el.appendChild(wrap);
+    const legend = document.createElement('div'); legend.className = 'hint'; legend.style.marginTop = '6px';
+    legend.textContent = 'Colour: blue under 85% · amber 85–100% · red over 100% (more than the pool\'s normal hours, i.e. overtime).';
+    el.appendChild(legend);
+    el.style.display = '';
   }
 
   function answerQuestion(q){
@@ -4728,6 +4809,7 @@
     const ganttScrollLeft = prevGanttScroll ? prevGanttScroll.scrollLeft : 0;
     const ganttScrollTop = prevGanttScroll ? prevGanttScroll.scrollTop : 0;
     section.innerHTML = '';
+    renderPoolMonthPanel(null);
 
     if (state.tasks.length === 0){
       const p = document.createElement('div'); p.className = 'panel';
@@ -4738,6 +4820,7 @@
 
     const result = runSchedule();
     const { builds, dailyPoolUsage, stuck, remainingFromToday } = result;
+    renderPoolMonthPanel(dailyPoolUsage);
 
     if (stuck){
       const banner = document.createElement('div');
