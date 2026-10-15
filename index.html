@@ -1255,6 +1255,16 @@
     if (es) chips.push({ text: 'Not before ' + fmtShort(parseISO(es)), color: 'var(--accent)', title: 'Earliest start date set — nothing is scheduled before it (right-click the job to change)' });
     const out = outsourcedSummaryText(raw);
     if (out) chips.push({ text: 'OUT: ' + out, color: 'var(--warn)', title: 'Outsourced — no labour hours; away for the days shown or until the arrival date (right-click the job to change)' });
+    // Tasks that need a labour pool with no hours at all (e.g. all-outsourced Paint) take no time in the schedule — say so.
+    try {
+      const effB = effectiveBuildData(raw); const outInfo = effectiveOutsourcedInfo(raw);
+      state.tasks.forEach(t => {
+        if (!(Number(effB.hours && effB.hours[t.id]) > 0) || outInfo[t.id]) return;
+        const pp = state.pools.find(p => p.id === t.poolId), bp = t.secondaryPoolId ? state.pools.find(p => p.id === t.secondaryPoolId) : null;
+        if (!poolHasAnyCapacity(pp) && !poolHasAnyCapacity(bp))
+          chips.push({ text: 'No in-house ' + t.name, color: 'var(--ink-muted)', title: t.name + ' uses a labour pool with no hours at all, so it takes no time in the schedule. Set outsourcing days on the job if it should leave a gap.' });
+      });
+    } catch (e){}
     if (raw.buildSheetManualDate) chips.push({ text: 'Build sheet ' + fmtShort(parseISO(raw.buildSheetManualDate)) + ' (manual)', color: '#c0392b', title: 'Build sheet release date set by hand (right-click the job to change)' });
     return chips;
   }
@@ -1867,6 +1877,18 @@
     if (!Array.isArray(state.capacityAdjust)) state.capacityAdjust = [];
     state.capacityAdjust = state.capacityAdjust.filter(a => a && typeof a === 'object').map(a => ({ id: a.id || uid('ca'), poolId: a.poolId, start: a.start || '', end: a.end || a.start || '', people: Number(a.people) || 0, note: a.note || '' }));
     state.shutdowns = state.shutdowns.filter(s => s && typeof s === 'object').map(s => ({ id: s.id || uid('sd'), name: s.name || '', start: s.start || '', end: s.end || '' }));
+    // Repair shutdowns saved with impossible dates (see shutdownValid): swap a reversed range, drop one that is still unusable
+    // (so a bad date can't freeze the whole schedule), and list what was changed in the notice on the Schedule tab.
+    {
+      const kept = [], notes = [];
+      state.shutdowns.forEach(s => {
+        if (s.start && s.end && s.end < s.start) { const t = s.start; s.start = s.end; s.end = t; }
+        if (!s.end) s.end = s.start;
+        if (shutdownValid(s)) kept.push(s);
+        else if (s.start || s.end) notes.push('Removed a shutdown with impossible dates' + (s.name ? ' (' + s.name + ')' : '') + ': ' + (s.start || '?') + ' to ' + (s.end || '?') + ' — add it again with the right dates');
+      });
+      if (notes.length){ state.shutdowns = kept; state.meta = state.meta || {}; state.meta.weekendFixNotice = (state.meta.weekendFixNotice || []).concat(notes); }
+    }
     state.financialReports.forEach(r => {
       if (!r.costOfGoodsByTask) r.costOfGoodsByTask = {};
       if (!r.costOfGoodsByOption) r.costOfGoodsByOption = {};
@@ -2262,11 +2284,35 @@
   // ---------- factory shutdowns (holidays, Christmas close-down…): inclusive date ranges when the whole factory is
   // shut. No internal labour is available on those days (every pool is 0) and outsourced work doesn't progress
   // either (an away day only counts on a day the factory is open). Edited under Setup > Factory shutdowns. ----------
+  // A usable shutdown: real dates in 2000–2100, the end not before the start, and no longer than ~13 months. This stops a
+  // half-typed date (a date box passes through years like 0002 on the way to 2026) from shutting the factory for centuries,
+  const sensibleDateISO = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) && +String(v).slice(0, 4) >= 2000 && +String(v).slice(0, 4) <= 2100;
+  // which would stop the schedule from ever finishing.
+  function shutdownValid(s){
+    if (!s || !s.start) return false;
+    const ok = (x) => /^\d{4}-\d{2}-\d{2}$/.test(String(x)) && +String(x).slice(0, 4) >= 2000 && +String(x).slice(0, 4) <= 2100;
+    const e = s.end || s.start;
+    if (!ok(s.start) || !ok(e) || e < s.start) return false;
+    return (parseISO(e) - parseISO(s.start)) / 86400000 <= 400;
+  }
   function shutdownOn(dateISO){
-    return (state.shutdowns || []).find(s => s && s.start && dateISO >= s.start && dateISO <= (s.end || s.start)) || null;
+    return (state.shutdowns || []).find(s => shutdownValid(s) && dateISO >= s.start && dateISO <= (s.end || s.start)) || null;
   }
   function isShutdownDay(dateISO){ return !!shutdownOn(dateISO); }
 
+  // Does this labour pool EVER have hours — on any weekday, in any week override, as overtime, or through a labour
+  // adjustment? A pool with none at all (e.g. a Paint pool kept at 0 because all painting is outsourced) can never do any
+  // in-house work, so tasks that draw on it must not stop the schedule from finishing.
+  function poolHasAnyCapacity(pool){
+    if (!pool) return false;
+    const dows = [0, 1, 2, 3, 4, 5, 6];
+    const ot = Number(pool.overtimeHours) > 0;
+    const crewHours = (emps, otEmps) => dows.some(d => ((Number(emps && emps[d]) || 0) * (Number(pool.shiftHours && pool.shiftHours[d]) || 0) > 0) || (ot && (Number(otEmps && otEmps[d]) || 0) > 0));
+    if (crewHours(pool.employees, pool.overtimeEmployees)) return true;
+    if ((pool.overrides || []).some(o => crewHours(o.employees, o.overtimeEmployees))) return true;
+    if ((state.capacityAdjust || []).some(a => a && a.poolId === pool.id && Number(a.people) > 0)) return true;
+    return false;
+  }
   function poolHoursOn(pool, dateISO){
     if (isShutdownDay(dateISO)) return 0;
     const weekStart = mondayOf(dateISO);
@@ -2687,6 +2733,14 @@
                    out: { days: left, left: left, started: false, arrive: outArrive || null } };
         }
         const plan = Number(eff.hours[t.id]) || 0;
+        // A task whose labour pool(s) have NO hours at all (e.g. a Paint pool left at 0 because painting is all outsourced)
+        // can't be done in-house, so it takes no time here instead of blocking the whole schedule forever. Outsourcing days
+        // (handled above) still give it a gap on the timeline; this only covers the case where none were set.
+        if (plan > 0){
+          const primaryPool = poolById[t.poolId], backupPool = t.secondaryPoolId ? poolById[t.secondaryPoolId] : null;
+          if (!poolHasAnyCapacity(primaryPool) && !poolHasAnyCapacity(backupPool))
+            return { taskId: t.id, hoursPlan: 0, remaining: 0, done: true, capPeople: null, allocatedToday: 0, noPool: true, skippedHours: plan };
+        }
         const completed = Math.min(plan, completedByTask[t.id] || 0);
         const remaining = Math.max(0, plan - completed);
         const capPeopleRaw = eff.maxPerDay ? eff.maxPerDay[t.id] : null;
@@ -3576,8 +3630,8 @@
       people.addEventListener('change', () => { a.people = Number(people.value) || 0; save(); renderResults(); });
       const from = document.createElement('input'); from.type = 'date'; from.value = a.start || '';
       const to = document.createElement('input'); to.type = 'date'; to.value = a.end || '';
-      from.addEventListener('change', () => { a.start = from.value; if (!a.end || a.end < a.start){ a.end = a.start; to.value = a.end; } save(); renderResults(); });
-      to.addEventListener('change', () => { a.end = to.value; if (a.start && a.end < a.start){ a.end = a.start; to.value = a.end; } save(); renderResults(); });
+      from.addEventListener('change', () => { if (!sensibleDateISO(from.value)) return; a.start = from.value; if (!a.end || a.end < a.start){ a.end = a.start; to.value = a.end; } save(); renderResults(); });
+      to.addEventListener('change', () => { if (!sensibleDateISO(to.value)) return; a.end = to.value; if (a.start && a.end < a.start){ a.end = a.start; to.value = a.end; } save(); renderResults(); });
       const note = document.createElement('input'); note.type = 'text'; note.placeholder = 'note'; note.value = a.note || ''; note.style.minWidth = '200px';
       note.addEventListener('input', () => { a.note = note.value; save(); });
       const del = document.createElement('button'); del.className = 'icon ghost'; del.textContent = '✕'; del.title = 'Remove this adjustment';
@@ -4268,7 +4322,7 @@
     }
     el.innerHTML = '';
     const head = document.createElement('div'); head.style.cssText = 'display:flex;gap:10px;align-items:center;justify-content:space-between';
-    const t = document.createElement('b'); t.textContent = 'Releases, orders and deliveries cannot fall on a weekend or a shutdown — ' + list.length + ' saved date' + (list.length === 1 ? '' : 's') + ' moved to the next working day:';
+    const t = document.createElement('b'); t.textContent = 'Saved dates were adjusted (' + list.length + '). Releases, orders and deliveries cannot fall on a weekend or a shutdown, and a shutdown needs real dates:';
     const ok = document.createElement('button'); ok.className = 'ghost'; ok.textContent = 'OK, dismiss';
     ok.addEventListener('click', () => { state.meta.weekendFixNotice = []; save(); renderWeekendNotice(); });
     head.appendChild(t); head.appendChild(ok); el.appendChild(head);
@@ -4494,8 +4548,20 @@
       const count = document.createElement('span'); count.className = 'hint'; count.style.margin = '0';
       const upd = () => { const n = shutdownDayCount(s); count.textContent = n ? n + ' day' + (n === 1 ? '' : 's') : ''; };
       upd();
-      from.addEventListener('change', () => { s.start = from.value; if (!s.end || s.end < s.start){ s.end = s.start; to.value = s.end; } upd(); save(); applyNonWorkingFix(); });
-      to.addEventListener('change', () => { s.end = to.value; if (s.start && s.end < s.start){ s.end = s.start; to.value = s.end; } upd(); save(); applyNonWorkingFix(); });
+      // Ignore a date that's only partly typed (years like 0002 on the way to 2026) and refuse a range that is impossibly long,
+      // so a slip of the keyboard can never shut the factory for years and stop the schedule finishing.
+      from.addEventListener('change', () => {
+        if (!sensibleDateISO(from.value)) return;
+        const ne = (!s.end || s.end < from.value) ? from.value : s.end;
+        if (!shutdownValid({ start: from.value, end: ne })){ appToast('A shutdown can be at most 13 months long.'); from.value = s.start; return; }
+        s.start = from.value; s.end = ne; to.value = s.end; upd(); save(); applyNonWorkingFix();
+      });
+      to.addEventListener('change', () => {
+        if (!sensibleDateISO(to.value)) return;
+        const ns = s.start && s.start <= to.value ? s.start : to.value;
+        if (!shutdownValid({ start: ns, end: to.value })){ appToast('A shutdown can be at most 13 months long.'); to.value = s.end; return; }
+        s.start = ns; s.end = to.value; from.value = s.start; upd(); save(); applyNonWorkingFix();
+      });
       const lf = document.createElement('label'); lf.textContent = 'From'; lf.style.minWidth = '0';
       const lt = document.createElement('label'); lt.textContent = 'to'; lt.style.minWidth = '0';
       const del = document.createElement('button'); del.className = 'icon ghost'; del.textContent = '✕'; del.title = 'Remove this shutdown';
@@ -4825,7 +4891,7 @@
     if (stuck){
       const banner = document.createElement('div');
       banner.className = 'banner';
-      banner.innerHTML = '<strong>Schedule didn\'t finish within 10 years.</strong> Check for a dependency loop in a template, or a task whose pool has 0 hours every day.';
+      banner.innerHTML = '<strong>Schedule didn\'t finish within 10 years.</strong> Check for a dependency loop in a template, or a shutdown that covers a huge range of dates (see Setup > Factory shutdowns).';
       section.appendChild(banner);
     }
 
