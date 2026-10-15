@@ -476,12 +476,12 @@
 
   <section class="panel row-gap" data-collapse-key="builds">
     <h2>Builds</h2>
-    <div class="hint">Drag the ⠿ handle to reorder — top gets pool hours first each day. Use the small dropdown under Machine type to apply a template. Order date ("auto", dashed) keeps itself updated to when the shop could actually start the job — type a date to pin it as a fixed constraint, or click "↺ Auto" to go back to auto-updating. Lead (days) and hours per task follow the linked template by default — type a value to override just that job (shown in red); click into an overridden number and press R to reset it back to the template value. A notes box appears under a job's hours whenever it has an override, to record why. Track each job's real-world stage using the Status dropdown in Build summary below — moving it past "Scheduled" turns its ORDERED block on the schedule from grey to confirmed.</div>
+    <div class="hint">Drag the ⠿ handle to reorder — top gets pool hours first each day. Use the small dropdown under Machine type to apply a template. Order date ("auto", dashed) keeps itself updated to when the shop could actually start the job — type a date to pin it as a fixed constraint, or click "↺ Auto" to go back to auto-updating. Lead (working days) and hours per task follow the linked template by default — type a value to override just that job (shown in red); click into an overridden number and press R to reset it back to the template value. A notes box appears under a job's hours whenever it has an override, to record why. Track each job's real-world stage using the Status dropdown in Build summary below — moving it past "Scheduled" turns its ORDERED block on the schedule from grey to confirmed.</div>
     <div class="scroll-x">
       <table class="matrix" id="buildTable">
         <thead>
           <tr>
-            <th></th><th>Job #</th><th>Dealer</th><th>Customer</th><th>Machine type</th><th>Order date</th><th>Lead (days)</th>
+            <th></th><th>Job #</th><th>Dealer</th><th>Customer</th><th>Machine type</th><th>Order date</th><th title="Purchasing lead time in WORKING days — weekends and holidays / shutdowns don't count down">Lead (working days)</th>
             <th id="buildTaskHeaders" colspan="1" style="text-align:center">Hours per task</th><th></th>
           </tr>
           <tr id="buildSubHeaders"><th colspan="7"></th></tr>
@@ -1150,11 +1150,11 @@
       const late = auto && inp.value > auto;
       const earlier = auto && inp.value < auto;
       const lead = Number(effectiveBuildData(raw).leadDays) || 0;
-      const startFrom = toISO(addDays(parseISO(minOrder), lead));
+      const startFrom = toISO(addWorkingDays(parseISO(minOrder), lead));
       preview.style.color = late ? 'var(--critical)' : 'var(--ink-muted)';
       preview.textContent = (late ? 'Later than the calculated date — ' : (earlier ? 'Earlier than the calculated date — ' : ''))
         + 'order date becomes ' + fmtShort(parseISO(minOrder)) + (raw.orderDate && raw.orderDate !== minOrder ? ' (was ' + fmtShort(parseISO(raw.orderDate)) + ')' : '')
-        + ', and work can start from ' + fmtShort(parseISO(startFrom)) + ' (order date + ' + lead + ' day lead time).';
+        + ', and work can start from ' + fmtShort(parseISO(startFrom)) + ' (order date + ' + lead + ' working-day lead time).';
     };
     inp.addEventListener('input', showPreview); inp.addEventListener('change', showPreview);
     showPreview();
@@ -1379,7 +1379,7 @@
     }
     if (!order) return null;
     const days = Number(effectiveBuildData(b).leadDays) || 0;
-    return toISO(addDays(parseISO(order), days));
+    return toISO(addWorkingDays(parseISO(order), days));
   }
 
   // ---------- when the build sheet needs to be released: working days BACKWARD from order date (drafting has
@@ -1404,7 +1404,7 @@
     const scheduled = result.builds.find(x => x.id === buildId);
     if (!scheduled || !scheduled.startDate) return null;
     const days = Number(effectiveBuildData(build).leadDays) || 0;
-    return prevWorkingISO(toISO(addDays(parseISO(scheduled.startDate), -days)));
+    return prevWorkingISO(toISO(addWorkingDays(parseISO(scheduled.startDate), -days)));
   }
 
   function defaultDayHours(weekdayVal, fridayVal, weekendVal){
@@ -4124,7 +4124,7 @@
       if (orderBound){
         const sheetOut = ['build_sheet_released', 'ordered', 'received', 'in_production'].includes(raw.status);
         const earliestOrder = nextWorkingISO(sheetOut ? todayISO : toISO(addWorkingDays(parseISO(todayISO), bsLead)));
-        let newOrder = toISO(addDays(parseISO(freeRun.startDate), -lead));
+        let newOrder = toISO(addWorkingDays(parseISO(freeRun.startDate), -lead));
         if (newOrder < earliestOrder) newOrder = earliestOrder;
         if (isNonWorkingISO(newOrder)) newOrder = prevWorkingISO(newOrder); // never a weekend or a holiday / shutdown day
         const curOrder = raw.orderDate || b.orderHoldDate;
@@ -10823,8 +10823,8 @@
     panel.innerHTML = `<h2>Tasks — ${crumbLabel}</h2><div class="hint">Laid out like Setup's Machine templates — task, hours, max people at once, and dependencies are all visible here. Click a task's name to expand its sub-tasks underneath.</div>`;
 
     const leadRow = document.createElement('div'); leadRow.className = 'field-row'; leadRow.style.marginTop = '10px';
-    const leadLabel = document.createElement('label'); leadLabel.textContent = 'Lead time (days)';
-    leadLabel.title = 'Purchasing lead time — how long materials take to arrive once ordered.';
+    const leadLabel = document.createElement('label'); leadLabel.textContent = 'Lead time (working days)';
+    leadLabel.title = 'Purchasing lead time — how many WORKING days materials take to arrive once ordered. Weekends and holiday / shutdown days do not count down.';
     leadRow.appendChild(leadLabel);
     const leadInp = makeHourInput(owner.leadDays ?? 0, (val) => { owner.leadDays = Number(val) || 0; save(); });
     leadInp.step = 1;
@@ -10833,7 +10833,7 @@
     // order can even be placed, so the release date is order date MINUS this (working days only, no weekends).
     // Doesn't extend the purchasing lead time above or the earliest start date; see Schedule & Builds' "Build
     // sheet release" column for the resulting date.
-    const bsLeadLabel = document.createElement('label'); bsLeadLabel.textContent = 'Build sheet lead time (days)';
+    const bsLeadLabel = document.createElement('label'); bsLeadLabel.textContent = 'Build sheet lead time (working days)';
     bsLeadLabel.title = 'How many working days before Order date the build sheet needs to be released.';
     leadRow.appendChild(bsLeadLabel);
     const bsLeadInp = makeHourInput(owner.buildSheetLeadDays ?? 0, (val) => { owner.buildSheetLeadDays = Number(val) || 0; save(); });
