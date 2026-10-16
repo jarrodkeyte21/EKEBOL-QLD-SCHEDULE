@@ -1368,16 +1368,24 @@
   // Null if no order date set (unconstrained). Lead time tracks the linked template/job unless overridden. The
   // build sheet's own lead time (see buildSheetReleaseDate) runs BEFORE order date, not after, so it doesn't
   // extend this. ----------
+  // The build sheet has to be released, and its set time (the build sheet lead time, in working days) has to pass, before an
+  // order can be placed. "Released" means the build sheet release date set by hand, or the day the job was marked
+  // "Build Sheet Released". Returns the first date an order may be placed, or null while no release date is known.
+  const RELEASED_STATUSES = ['build_sheet_released', 'ordered', 'received', 'in_production', 'complete'];
+  function buildSheetReleaseActual(b){
+    return b.buildSheetManualDate || (RELEASED_STATUSES.includes(b.status) ? (b.buildSheetReleasedOn || null) : null);
+  }
+  function minOrderDate(b){
+    const rel = buildSheetReleaseActual(b); if (!rel) return null;
+    const bs = Number(effectiveBuildData(b).buildSheetLeadDays) || 0;
+    return toISO(addWorkingDays(parseISO(rel), bs));
+  }
   function earliestStart(b){
-    // A manually-set build sheet release date pushes the schedule if it's later than planned: the purchase order
-    // can't be placed until the sheet is released and its own lead time (working days) has passed, so the order
-    // date is treated as no earlier than that. It never pulls the schedule earlier than the order date given.
+    // The order can't be placed before the build sheet release + its lead time (see minOrderDate), so the order date is treated
+    // as no earlier than that. It never pulls the schedule earlier than the order date given.
     let order = b.orderDate || null;
-    if (b.buildSheetManualDate){
-      const bsDays = Number(effectiveBuildData(b).buildSheetLeadDays) || 0;
-      const minOrder = toISO(addWorkingDays(parseISO(b.buildSheetManualDate), bsDays));
-      if (!order || minOrder > order) order = minOrder;
-    }
+    const mo = minOrderDate(b);
+    if (mo && (!order || mo > order)) order = mo;
     if (!order) return null;
     const days = Number(effectiveBuildData(b).leadDays) || 0;
     return toISO(addWorkingDays(parseISO(order), days));
@@ -1405,7 +1413,10 @@
     const scheduled = result.builds.find(x => x.id === buildId);
     if (!scheduled || !scheduled.startDate) return null;
     const days = Number(effectiveBuildData(build).leadDays) || 0;
-    return prevWorkingISO(toISO(addWorkingDays(parseISO(scheduled.startDate), -days)));
+    let o = prevWorkingISO(toISO(addWorkingDays(parseISO(scheduled.startDate), -days)));
+    const mo = minOrderDate(build);
+    if (mo && o < mo) o = mo; // never earlier than the build sheet release + its set time
+    return o;
   }
 
   function defaultDayHours(weekdayVal, fridayVal, weekendVal){
@@ -1844,6 +1855,14 @@
       const label = b.jobNumber || b.customer || 'a job';
       if (b.orderDateAuto === false) fixOne(label, 'order date', b, 'orderDate');
       fixOne(label, 'build sheet release', b, 'buildSheetManualDate');
+      // an order can't be placed before the build sheet release + its set time
+      if (b.orderDateAuto === false && b.orderDate){
+        const mo = minOrderDate(b);
+        if (mo && b.orderDate < mo){
+          fixes.push(label + ' order date: ' + fmtShort(parseISO(b.orderDate)) + ' (before the build sheet lead time after its release) → ' + fmtShort(parseISO(mo)));
+          b.orderDate = mo;
+        }
+      }
       if (b.outsourcedArrive) Object.keys(b.outsourcedArrive).forEach(k => fixOne(label, 'arrival date', b.outsourcedArrive, k));
     });
     (state.jobRecords || []).forEach(j => (j.tasks || []).forEach(t => fixOne(j.jobNumber || 'a job', (t.name || 'task') + ' arrival date', t, 'outsourcedArrive')));
@@ -4998,10 +5017,11 @@ ${busyRows ? `<h2 style="font-size:14px;border:none">Jobs using the labour this 
       const orderInp = document.createElement('input'); orderInp.type = 'date'; orderInp.value = b.orderDate || '';
       orderInp.title = b.orderDateAuto
         ? 'Auto — follows when this job could actually start given current shop capacity and priority. Edit to pin a fixed date instead.'
-        : 'Date materials/parts need to be ordered. Leave blank for no lead-time wait.';
+        : 'Date materials/parts need to be ordered. Leave blank for no lead-time wait.' + (minOrderDate(b) ? ' Earliest allowed: ' + fmtShort(parseISO(minOrderDate(b))) + ' (build sheet release + its set time).' : '');
       if (b.orderDateAuto) orderInp.classList.add('auto-value');
       orderInp.addEventListener('change', () => {
         let od = orderInp.value || ''; if (od && isNonWorkingISO(od)){ const why = nonWorkingReason(od); const fixed = nextWorkingISO(od); appToast('Orders cannot be placed on ' + why + ' — moved to ' + fmtShort(parseISO(fixed))); od = fixed; }
+        { const mo = minOrderDate(b); if (od && mo && od < mo){ appToast('Orders cannot be placed until ' + fmtShort(parseISO(mo)) + ' — ' + (Number(effectiveBuildData(b).buildSheetLeadDays) || 0) + ' working days after the build sheet release (' + fmtShort(parseISO(buildSheetReleaseActual(b))) + ').'); od = mo; } }
         b.orderDate = od; b.orderDateAuto = false;
         save(); renderBuildTable(); renderResults();
       });
@@ -5223,7 +5243,32 @@ ${busyRows ? `<h2 style="font-size:14px;border:none">Jobs using the labour this 
         statusSel.addEventListener('change', () => {
           if (!rawBuild) return;
           const wasComplete = rawBuild.status === 'complete';
+          // Orders can only be placed once the build sheet is released and its set time (the build sheet lead time, in working
+          // days) has passed — so a job can't be marked Ordered / Received / In production before then.
+          const ORDERED = ['ordered', 'received', 'in_production'];
+          const prevStatus = rawBuild.status || 'scheduled', newStatus = statusSel.value;
+          if (ORDERED.includes(newStatus) && !ORDERED.includes(prevStatus) && prevStatus !== 'complete'){
+            const bsLead = Number(effectiveBuildData(rawBuild).buildSheetLeadDays) || 0;
+            const rel = buildSheetReleaseActual(rawBuild), mo = minOrderDate(rawBuild);
+            if (bsLead > 0 && !rel){
+              appToast('Release the build sheet first — orders can be placed ' + bsLead + ' working day' + (bsLead === 1 ? '' : 's') + ' after it is released.');
+              statusSel.value = prevStatus; return;
+            }
+            if (mo && getTodayISO() < mo){
+              appToast('Orders cannot be placed until ' + fmtShort(parseISO(mo)) + ' — ' + bsLead + ' working day' + (bsLead === 1 ? '' : 's') + ' after the build sheet release on ' + fmtShort(parseISO(rel)) + '.');
+              statusSel.value = prevStatus; return;
+            }
+          }
+          if (newStatus === 'build_sheet_released' && !rawBuild.buildSheetReleasedOn) rawBuild.buildSheetReleasedOn = getTodayISO();
+          if (newStatus === 'scheduled') rawBuild.buildSheetReleasedOn = null; // not released (any more)
           rawBuild.status = statusSel.value;
+          { // a pinned order date can't be earlier than release + set time
+            const mo2 = minOrderDate(rawBuild);
+            if (mo2 && rawBuild.orderDate && rawBuild.orderDate < mo2){
+              appToast('Order date moved to ' + fmtShort(parseISO(mo2)) + ' — orders cannot be placed until the build sheet lead time after its release.');
+              rawBuild.orderDate = mo2; rawBuild.orderDateAuto = false;
+            }
+          }
           if (statusSel.value === 'complete' && !wasComplete) rawBuild.completedDate = getTodayISO();
           else if (statusSel.value !== 'complete') rawBuild.completedDate = null;
           statusSel.className = 'status-select status-' + statusSel.value;
