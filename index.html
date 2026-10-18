@@ -470,6 +470,8 @@
 
   <section class="panel row-gap" id="moveBuildPreviewSection" data-collapse-key="move"></section>
 
+  <section class="panel row-gap" id="planSection" data-collapse-key="plan"></section>
+
   <section class="panel row-gap" id="askSection" data-collapse-key="ask"></section>
 
   <section class="panel row-gap" id="suggestSection" data-collapse-key="suggest"></section>
@@ -5528,6 +5530,7 @@ ${busyRows ? `<h2 style="font-size:14px;border:none">Jobs using the labour this 
     if (stockPage && stockPage.style.display !== 'none') renderStock();
 
     renderMoveBuildPreviewPanel();
+    renderPlanPanel();
   }
 
   // ---------- render: job history — every build that has ever existed, active or removed from Build summary,
@@ -6072,6 +6075,160 @@ ${busyRows ? `<h2 style="font-size:14px;border:none">Jobs using the labour this 
     state.builds.forEach(b => { if (!placed.has(b.id)) reordered.push(b); });
     state.builds = reordered;
     save();
+  }
+
+  // ---------- Cash flow & labour planner: queue up "what if" moves (lend people from one pool to another for a date range,
+  // add overtime people, pull a job ahead of others), see every job's finish date and the income landing each month
+  // before and after, then apply the lot (and undo it) only if you like it. Everything is tested with the real scheduler
+  // on a copy (simulateWith) — nothing changes until Apply. Income lands in the month a job is due to finish. ----------
+  const planUI = { moves: [], undo: null, msg: '', draft: { type: 'labour', buildId: '', beforeId: '', from: '', to: '', people: 1, start: '', end: '' } };
+  function planScenario(){
+    let order = state.builds.map(b => b.id); const adjs = [];
+    planUI.moves.forEach(m => {
+      if (m.type === 'prio'){
+        if (!order.includes(m.buildId)) return;
+        order = order.filter(id => id !== m.buildId);
+        const i = m.beforeId ? order.indexOf(m.beforeId) : 0; order.splice(i < 0 ? 0 : i, 0, m.buildId);
+      } else {
+        const note = 'Planner: ' + (m.from ? 'lend' : 'add') + ' ' + m.people;
+        if (m.from) adjs.push({ poolId: m.from, start: m.start, end: m.end, people: -m.people, note });
+        if (m.to) adjs.push({ poolId: m.to, start: m.start, end: m.end, people: m.people, note });
+      }
+    });
+    const byId = Object.fromEntries(state.builds.map(b => [b.id, b]));
+    return { order, adjs, patch: { builds: order.map(id => byId[id]), capacityAdjust: (state.capacityAdjust || []).concat(adjs.map(a => Object.assign({ id: uid('ca') }, a))) } };
+  }
+  function planCash(res){
+    const m = {};
+    res.builds.forEach(b => {
+      if (b.archived || b.status === 'complete' || !b.finishDate) return;
+      const k = b.finishDate.slice(0, 7); const e = m[k] = m[k] || { sum: 0, n: 0, unpriced: 0 };
+      e.n++; if (b.saleValue !== null && b.saleValue !== undefined) e.sum += Number(b.saleValue) || 0; else e.unpriced++;
+    });
+    return m;
+  }
+  function planMoveText(m){
+    const pn = id => (state.pools.find(p => p.id === id) || { name: '?' }).name;
+    if (m.type === 'prio'){ const b = state.builds.find(x => x.id === m.buildId), a = m.beforeId && state.builds.find(x => x.id === m.beforeId);
+      return 'Pull ' + (b ? buildLabel(b) : 'job') + ' ahead of ' + (a ? buildLabel(a) : 'everything else'); }
+    return (m.from ? 'Lend ' + m.people + ' from ' + pn(m.from) + (m.to ? ' to ' + pn(m.to) : ' (out)') : 'Add ' + m.people + ' to ' + pn(m.to) + ' (overtime / temp)')
+      + ', ' + fmtShort(parseISO(m.start)) + (m.end !== m.start ? ' – ' + fmtShort(parseISO(m.end)) : '');
+  }
+  function renderPlanPanel(){
+    const el = document.getElementById('planSection'); if (!el) return;
+    el.innerHTML = '<h2>Cash flow &amp; labour planner</h2><div class="hint">Try moving labour or jobs around to bring income forward. Add moves, check what happens to every job\'s finish and to income each month, then apply.</div>';
+    if (!state.pools.length){ applyAllCollapsibles(); return; }
+    const d = planUI.draft; if (!d.start) d.start = getTodayISO(); if (!d.end) d.end = d.start;
+    const eligible = state.builds.filter(b => !b.archived && b.status !== 'complete');
+    const mk = (tag, txt) => { const x = document.createElement(tag); if (txt !== undefined) x.textContent = txt; return x; };
+    const poolSel = (val, blank, cb) => { const s = document.createElement('select'); const o0 = mk('option', blank); o0.value = ''; s.appendChild(o0);
+      state.pools.forEach(p => { const o = mk('option', p.name); o.value = p.id; if (p.id === val) o.selected = true; s.appendChild(o); });
+      s.addEventListener('change', () => cb(s.value)); return s; };
+    const jobSel = (val, blank, cb) => { const s = document.createElement('select'); const o0 = mk('option', blank); o0.value = ''; s.appendChild(o0);
+      eligible.forEach(b => { const o = mk('option', buildLabel(b)); o.value = b.id; if (b.id === val) o.selected = true; s.appendChild(o); });
+      s.addEventListener('change', () => cb(s.value)); return s; };
+    const lab = t => { const l = mk('label', t); l.style.minWidth = '0'; return l; };
+
+    const typeRow = mk('div'); typeRow.className = 'field-row'; typeRow.style.marginTop = '10px';
+    const tsel = document.createElement('select');
+    [['labour', 'Move / add labour'], ['prio', 'Pull a job forward']].forEach(([v, t]) => { const o = mk('option', t); o.value = v; if (d.type === v) o.selected = true; tsel.appendChild(o); });
+    tsel.addEventListener('change', () => { d.type = tsel.value; renderPlanPanel(); });
+    typeRow.appendChild(lab('Move type')); typeRow.appendChild(tsel); el.appendChild(typeRow);
+
+    const row = mk('div'); row.className = 'field-row';
+    if (d.type === 'labour'){
+      const ppl = document.createElement('input'); ppl.type = 'number'; ppl.min = '1'; ppl.step = '1'; ppl.style.width = '64px'; ppl.value = d.people;
+      ppl.addEventListener('change', () => { d.people = Math.max(1, Math.round(Number(ppl.value) || 1)); ppl.value = d.people; });
+      const f = document.createElement('input'); f.type = 'date'; f.value = d.start;
+      const t = document.createElement('input'); t.type = 'date'; t.value = d.end;
+      f.addEventListener('change', () => { if (!sensibleDateISO(f.value)) { f.value = d.start; return; } d.start = f.value; if (d.end < d.start){ d.end = d.start; t.value = d.end; } });
+      t.addEventListener('change', () => { if (!sensibleDateISO(t.value)) { t.value = d.end; return; } d.end = t.value < d.start ? d.start : t.value; t.value = d.end; });
+      [lab('Take'), ppl, lab('people from'), poolSel(d.from, '— none (extra people) —', v => d.from = v), lab('and give to'), poolSel(d.to, '— none (lend out) —', v => d.to = v), lab('from'), f, lab('to'), t].forEach(x => row.appendChild(x));
+    } else {
+      [lab('Pull'), jobSel(d.buildId, '— pick a job —', v => d.buildId = v), lab('ahead of'), jobSel(d.beforeId, '— everything else —', v => d.beforeId = v)].forEach(x => row.appendChild(x));
+    }
+    const add = mk('button', '+ Add to plan'); add.className = 'primary';
+    add.addEventListener('click', () => {
+      if (d.type === 'labour'){
+        if (!d.from && !d.to){ planUI.msg = 'Pick a pool to take people from, to give them to, or both.'; return renderPlanPanel(); }
+        if (d.from && d.from === d.to){ planUI.msg = 'Pick two different pools.'; return renderPlanPanel(); }
+        planUI.moves.push({ type: 'labour', from: d.from, to: d.to, people: d.people, start: d.start, end: d.end });
+      } else {
+        if (!d.buildId){ planUI.msg = 'Pick the job to pull forward.'; return renderPlanPanel(); }
+        if (d.buildId === d.beforeId){ planUI.msg = 'Pick a different job to go ahead of.'; return renderPlanPanel(); }
+        planUI.moves.push({ type: 'prio', buildId: d.buildId, beforeId: d.beforeId });
+      }
+      planUI.msg = ''; renderPlanPanel();
+    });
+    row.appendChild(add); el.appendChild(row);
+    if (planUI.msg){ const m = mk('div', planUI.msg); m.className = 'hint'; m.style.color = 'var(--critical)'; el.appendChild(m); }
+    if (planUI.undo){
+      const u = mk('div'); u.className = 'hint'; u.style.marginTop = '6px'; u.textContent = 'Plan applied. ';
+      const ub = mk('button', 'Undo'); ub.className = 'ghost';
+      ub.addEventListener('click', () => { try { state = JSON.parse(planUI.undo); normalizeState(); planUI.undo = null; planUI.msg = ''; save(); renderAll(); } catch (e){ planUI.msg = 'Could not undo: ' + e.message; renderPlanPanel(); } });
+      u.appendChild(ub); el.appendChild(u);
+    }
+    if (!planUI.moves.length){ const n = mk('div', 'No moves yet. Add one above to see its effect.'); n.className = 'dep-empty'; n.style.marginTop = '10px'; el.appendChild(n); applyAllCollapsibles(); return; }
+
+    const list = mk('div'); list.style.marginTop = '10px';
+    planUI.moves.forEach((m, i) => {
+      const r = mk('div'); r.style.cssText = 'display:flex;gap:8px;align-items:center;margin-bottom:4px';
+      const x = mk('button', '✕'); x.className = 'icon ghost'; x.title = 'Remove this move';
+      x.addEventListener('click', () => { planUI.moves.splice(i, 1); renderPlanPanel(); });
+      r.appendChild(x); r.appendChild(mk('span', planMoveText(m))); list.appendChild(r);
+    });
+    el.appendChild(list);
+
+    const sc = planScenario();
+    let base, cand;
+    try { base = runSchedule(); cand = simulateWith(sc.patch); }
+    catch (e){ el.appendChild(mk('div', 'Could not test this plan: ' + e.message)); applyAllCollapsibles(); return; }
+    const bc = planCash(base), cc = planCash(cand);
+    const months = Array.from(new Set(Object.keys(bc).concat(Object.keys(cc)))).sort();
+    const delta = (v) => Math.abs(v) < 50 ? '—' : (v > 0 ? '+' : '−') + fmtIncome(Math.abs(v));
+    const col = (v) => v > 0 ? 'var(--good)' : v < 0 ? 'var(--critical)' : 'inherit';
+    let tb = 0, tc = 0;
+    let html = '<h3 style="margin:14px 0 4px">Income by month (when jobs finish)</h3><table class="build-summary"><thead><tr><th>Month</th><th style="text-align:right">Now</th><th style="text-align:right">With plan</th><th style="text-align:right">Change</th></tr></thead><tbody>';
+    months.forEach(k => {
+      const a = (bc[k] || { sum: 0 }).sum, b = (cc[k] || { sum: 0 }).sum; tb += a; tc += b;
+      const [y, mo] = k.split('-').map(Number);
+      html += '<tr><td>' + MONTH_NAMES[mo - 1].slice(0, 3) + ' ' + y + '</td><td class="num">' + fmtIncome(a) + '</td><td class="num">' + fmtIncome(b) + '</td><td class="num" style="font-weight:700;color:' + col(b - a) + '">' + delta(b - a) + '</td></tr>';
+    });
+    html += '<tr style="border-top:2px solid var(--line)"><td><b>Total</b></td><td class="num">' + fmtIncome(tb) + '</td><td class="num">' + fmtIncome(tc) + '</td><td class="num">' + delta(tc - tb) + '</td></tr></tbody></table>';
+    const unp = Object.values(cc).reduce((s, e) => s + e.unpriced, 0);
+    if (unp) html += '<div class="hint">' + unp + ' open job(s) have no sale value yet and are not counted.</div>';
+
+    const bById = Object.fromEntries(base.builds.map(b => [b.id, b])); const rows = [];
+    cand.builds.forEach(b => {
+      if (b.archived || b.status === 'complete') return;
+      const a = bById[b.id]; if (!a || a.finishDate === b.finishDate) return;
+      rows.push({ b, a, d: a.finishDate && b.finishDate ? dayNumOf(a.finishDate) - dayNumOf(b.finishDate) : 0 });
+    });
+    rows.sort((x, y) => y.d - x.d);
+    html += '<h3 style="margin:14px 0 4px">Jobs whose finish date changes</h3>';
+    if (!rows.length) html += '<div class="dep-empty">No job\'s finish date changes with this plan.</div>';
+    else {
+      html += '<table class="build-summary"><thead><tr><th>Job</th><th>Finish now</th><th>With plan</th><th style="text-align:right">Days</th><th style="text-align:right">Value</th></tr></thead><tbody>';
+      rows.forEach(({ b, a, d: dd }) => {
+        html += '<tr><td>' + buildLabel(b).replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</td><td>' + (a.finishDate ? fmtShort(parseISO(a.finishDate)) : '—') + '</td><td>' + (b.finishDate ? fmtShort(parseISO(b.finishDate)) : '—')
+          + '</td><td class="num" style="font-weight:700;color:' + col(dd) + '">' + (dd > 0 ? dd + ' sooner' : dd < 0 ? -dd + ' later' : '—') + '</td><td class="num">' + (b.saleValue !== null && b.saleValue !== undefined ? fmtIncome(b.saleValue) : '—') + '</td></tr>';
+      });
+      html += '</tbody></table>';
+    }
+    const out = mk('div'); out.innerHTML = html; el.appendChild(out);
+    const bar = mk('div'); bar.className = 'toolbar'; bar.style.marginTop = '10px';
+    const ap = mk('button', 'Apply this plan'); ap.className = 'primary';
+    ap.addEventListener('click', () => {
+      planUI.undo = JSON.stringify(state);
+      const byId = Object.fromEntries(state.builds.map(b => [b.id, b]));
+      state.builds = sc.order.map(id => byId[id]); syncJobOrderFromBuilds();
+      sc.adjs.forEach(a => state.capacityAdjust.push(Object.assign({ id: uid('ca') }, a)));
+      planUI.moves = []; planUI.msg = ''; save(); renderAll();
+    });
+    const clr = mk('button', 'Clear plan'); clr.className = 'ghost';
+    clr.addEventListener('click', () => { planUI.moves = []; renderPlanPanel(); });
+    bar.appendChild(ap); bar.appendChild(clr); el.appendChild(bar);
+    applyAllCollapsibles();
   }
 
   let moveBuildPreviewState = { buildId: '', beforeBuildId: '', allowOverCapacity: false, result: null };
