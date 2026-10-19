@@ -994,7 +994,7 @@
       rows.forEach(r => {
         const d = Math.max(0, Math.min(365, Math.round(Number(r.days.value) || 0)));
         let a = r.arr.value || '';
-        if (a && isNonWorkingISO(a)){ const why = nonWorkingReason(a); a = nextWorkingISO(a); appToast('Deliveries cannot arrive on ' + why + ' — ' + ((state.tasks.find(t => t.id === r.id) || {}).name || 'task') + ' moved to ' + fmtShort(parseISO(a))); }
+        if (a && isNonWorkingISO(a)){ const why = nonWorkingReason(a); a = nearestWorkingISO(a); appToast('Deliveries cannot arrive on ' + why + ' — ' + ((state.tasks.find(t => t.id === r.id) || {}).name || 'task') + ' moved to ' + fmtShort(parseISO(a))); }
         if (r.cb.checked && (d > 0 || a)){ out[r.id] = d; outArr[r.id] = a; if (r.back.checked) done[r.id] = true; }
         else if (jobLevel(r.id)){ out[r.id] = 0; outArr[r.id] = ''; } // set on the job but in-house for this build
       });
@@ -1112,7 +1112,7 @@
   // working days) and pins it, so the start follows: earlier or later. The previous order date (and whether it was on
   // auto) is remembered so "Use calculated date" puts everything back as it was.
   function setBuildSheetManual(raw, val){
-    val = val ? nextWorkingISO(val) : '';
+    val = val ? nearestWorkingISO(val) : '';
     if (val){
       if (!raw.bsPrevOrder) raw.bsPrevOrder = { date: raw.orderDate || '', auto: raw.orderDateAuto !== false };
       const bsDays = Number(effectiveBuildData(raw).buildSheetLeadDays) || 0;
@@ -1145,7 +1145,7 @@
     const preview = document.createElement('div'); preview.className = 'hint'; preview.style.minHeight = '1.4em';
     const showPreview = () => {
       let weekendNote = '';
-      if (inp.value && isNonWorkingISO(inp.value)){ const why = nonWorkingReason(inp.value); inp.value = nextWorkingISO(inp.value); weekendNote = 'A build sheet cannot be released on ' + why + ' — moved to ' + fmtShort(parseISO(inp.value)) + '. '; }
+      if (inp.value && isNonWorkingISO(inp.value)){ const why = nonWorkingReason(inp.value); inp.value = nearestWorkingISO(inp.value); weekendNote = 'A build sheet cannot be released on ' + why + ' — moved to ' + fmtShort(parseISO(inp.value)) + '. '; }
       if (!inp.value){ preview.textContent = ''; return; }
       const bsDays = Number(effectiveBuildData(raw).buildSheetLeadDays) || 0;
       const minOrder = toISO(addWorkingDays(parseISO(inp.value), bsDays));
@@ -1849,7 +1849,7 @@
     const fixOne = (label, field, obj, key) => {
       const v = obj[key];
       if (v && typeof v === 'string' && isNonWorkingISO(v)){
-        const why = nonWorkingReason(v); const n = nextWorkingISO(v); obj[key] = n;
+        const why = nonWorkingReason(v); const n = nearestWorkingISO(v); obj[key] = n;
         fixes.push(label + ' ' + field + ': ' + fmtShort(parseISO(v)) + ' (' + why + ') → ' + fmtShort(parseISO(n)));
       }
     };
@@ -2275,6 +2275,12 @@
   }
   function nextWorkingISO(iso){ if (!iso) return iso; const d = parseISO(iso); let g = 0; while (isNonWorkingISO(toISO(d)) && g++ < 4000) d.setDate(d.getDate() + 1); return toISO(d); }
   function prevWorkingISO(iso){ if (!iso) return iso; const d = parseISO(iso); let g = 0; while (isNonWorkingISO(toISO(d)) && g++ < 4000) d.setDate(d.getDate() - 1); return toISO(d); }
+  // The closest working day to a date that lands on a weekend / holiday / shutdown — before or after, whichever is nearer (a tie goes
+  // later). Never earlier than today. Used when a date is moved off a non-working day, so a short break nudges it a day or two instead
+  // of jumping it past the whole shutdown.
+  function nearestWorkingISO(iso){ if (!iso || !isNonWorkingISO(iso)) return iso; const nx = nextWorkingISO(iso), pv = prevWorkingISO(iso);
+    if (!pv || pv < getTodayISO() || isNonWorkingISO(pv)) return nx;
+    return (parseISO(iso) - parseISO(pv)) < (parseISO(nx) - parseISO(iso)) ? pv : nx; }
   let appToastTimer = null;
   function appToast(msg){
     let el = document.getElementById('appToast');
@@ -5022,7 +5028,7 @@ ${busyRows ? `<h2 style="font-size:14px;border:none">Jobs using the labour this 
         : 'Date materials/parts need to be ordered. Leave blank for no lead-time wait.' + (minOrderDate(b) ? ' Earliest allowed: ' + fmtShort(parseISO(minOrderDate(b))) + ' (build sheet release + its set time).' : '');
       if (b.orderDateAuto) orderInp.classList.add('auto-value');
       orderInp.addEventListener('change', () => {
-        let od = orderInp.value || ''; if (od && isNonWorkingISO(od)){ const why = nonWorkingReason(od); const fixed = nextWorkingISO(od); appToast('Orders cannot be placed on ' + why + ' — moved to ' + fmtShort(parseISO(fixed))); od = fixed; }
+        let od = orderInp.value || ''; if (od && isNonWorkingISO(od)){ const why = nonWorkingReason(od); const fixed = nearestWorkingISO(od); appToast('Orders cannot be placed on ' + why + ' — moved to ' + fmtShort(parseISO(fixed))); od = fixed; }
         { const mo = minOrderDate(b); if (od && mo && od < mo){ appToast('Orders cannot be placed until ' + fmtShort(parseISO(mo)) + ' — ' + (Number(effectiveBuildData(b).buildSheetLeadDays) || 0) + ' working days after the build sheet release (' + fmtShort(parseISO(buildSheetReleaseActual(b))) + ').'); od = mo; } }
         b.orderDate = od; b.orderDateAuto = false;
         save(); renderBuildTable(); renderResults();
@@ -11438,7 +11444,7 @@ ${busyRows ? `<h2 style="font-size:14px;border:none">Jobs using the labour this 
         if (!t.taskRefId) arrInp.disabled = true;
         arrInp.addEventListener('click', (e) => e.stopPropagation());
         arrInp.addEventListener('change', () => {
-          if (arrInp.value && isNonWorkingISO(arrInp.value)){ const why = nonWorkingReason(arrInp.value); arrInp.value = nextWorkingISO(arrInp.value); appToast('Deliveries cannot arrive on ' + why + ' — moved to ' + fmtShort(parseISO(arrInp.value))); }
+          if (arrInp.value && isNonWorkingISO(arrInp.value)){ const why = nonWorkingReason(arrInp.value); arrInp.value = nearestWorkingISO(arrInp.value); appToast('Deliveries cannot arrive on ' + why + ' — moved to ' + fmtShort(parseISO(arrInp.value))); }
           t.outsourcedArrive = arrInp.value || null;
           if (t.taskRefId && owner && owner.id) state.builds.forEach(bb => { if (bb.jobRecordId === owner.id && bb.outsourcedArrive) delete bb.outsourcedArrive[t.taskRefId]; });
           save();
