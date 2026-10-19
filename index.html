@@ -12158,6 +12158,7 @@ ${busyRows ? `<h2 style="font-size:14px;border:none">Jobs using the labour this 
   // no stale event handlers are left pointing at detached objects. ----------
   let lastAutoRefreshKey = '';
   async function autoRefreshVisiblePage(){
+    const stateBefore = state;
     if (document.hidden) return;
     rolloverDateIfNeeded();
     const active = document.activeElement;
@@ -12172,7 +12173,9 @@ ${busyRows ? `<h2 style="font-size:14px;border:none">Jobs using the labour this 
       await pullRemoteStateIfNewer();
     } else {
       await pullRemoteStateIfNewer(); // picks up other people's changes — writes to localStorage if there's anything newer
-      state = load();
+      // Keep the LIVE state object unless local storage really differs from it (another tab) — swapping in a fresh copy
+      // every cycle leaves the on-screen inputs pointing at the old copy, so edits typed into them would be lost.
+      if (localStorage.getItem(STORE_KEY) !== JSON.stringify(state)) state = load();
       normalizeState();
       // Deliberately NOT save() here — this cycle's only job is picking up same-device-other-tab edits (via
       // shared localStorage) and persisting normalizeState()'s own fixups back locally. It must never trigger a
@@ -12185,6 +12188,7 @@ ${busyRows ? `<h2 style="font-size:14px;border:none">Jobs using the labour this 
     // Only rebuild the page when something actually changed (data, the day, or which tab is showing). Rebuilding every
     // 5 seconds regardless made the tool slow and reset scroll / focus while you worked.
     const shownPage = Array.from(document.querySelectorAll('[id^="page-"]')).filter(p => p.parentElement === document.body && p.style.display !== 'none').map(p => p.id).join(',');
+    if (state !== stateBefore) lastAutoRefreshKey = ''; // the data object was swapped: rebuild so inputs bind to the new one
     const refreshKey = shownPage + '|' + getTodayISO() + '|' + JSON.stringify(state);
     if (refreshKey === lastAutoRefreshKey) return;
     lastAutoRefreshKey = refreshKey;
