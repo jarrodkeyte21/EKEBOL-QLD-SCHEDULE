@@ -1846,17 +1846,25 @@
   function moveDatesOffNonWorkingDays(){
     if (!state.meta) state.meta = {};
     const fixes = [];
-    const fixOne = (label, field, obj, key) => {
-      const v = obj[key];
+    if (!state.meta.dateOrigins || typeof state.meta.dateOrigins !== 'object') state.meta.dateOrigins = {};
+    const origins = state.meta.dateOrigins; let changed = 0;
+    // Moves are REVERSIBLE: the date you typed is remembered, so if the shutdown that caused the move is later edited or
+    // removed (or was only half-typed) the date goes back to what you entered instead of staying pushed out.
+    const fixOne = (label, field, obj, key, id) => {
+      const ok = id + '|' + field + '|' + key;
+      const before = obj[key]; let v = before; const o = origins[ok];
+      if (o){ if (o.moved === v){ v = o.orig; obj[key] = v; } else delete origins[ok]; } // restore, then re-check below
       if (v && typeof v === 'string' && isNonWorkingISO(v)){
         const why = nonWorkingReason(v); const n = nearestWorkingISO(v); obj[key] = n;
-        fixes.push(label + ' ' + field + ': ' + fmtShort(parseISO(v)) + ' (' + why + ') → ' + fmtShort(parseISO(n)));
-      }
+        origins[ok] = { orig: v, moved: n };
+        if (!(o && o.moved === n && o.orig === v)) fixes.push(label + ' ' + field + ': ' + fmtShort(parseISO(v)) + ' (' + why + ') → ' + fmtShort(parseISO(n)));
+      } else delete origins[ok];
+      if (obj[key] !== before) changed++;
     };
     (state.builds || []).forEach(b => {
       const label = b.jobNumber || b.customer || 'a job';
-      if (b.orderDateAuto === false) fixOne(label, 'order date', b, 'orderDate');
-      fixOne(label, 'build sheet release', b, 'buildSheetManualDate');
+      if (b.orderDateAuto === false) fixOne(label, 'order date', b, 'orderDate', b.id);
+      fixOne(label, 'build sheet release', b, 'buildSheetManualDate', b.id);
       // an order can't be placed before the build sheet release + its set time
       if (b.orderDateAuto === false && b.orderDate){
         const mo = minOrderDate(b);
@@ -1865,11 +1873,11 @@
           b.orderDate = mo;
         }
       }
-      if (b.outsourcedArrive) Object.keys(b.outsourcedArrive).forEach(k => fixOne(label, 'arrival date', b.outsourcedArrive, k));
+      if (b.outsourcedArrive) Object.keys(b.outsourcedArrive).forEach(k => fixOne(label, 'arrival date', b.outsourcedArrive, k, b.id));
     });
-    (state.jobRecords || []).forEach(j => (j.tasks || []).forEach(t => fixOne(j.jobNumber || 'a job', (t.name || 'task') + ' arrival date', t, 'outsourcedArrive')));
+    (state.jobRecords || []).forEach(j => (j.tasks || []).forEach(t => fixOne(j.jobNumber || 'a job', (t.name || 'task') + ' arrival date', t, 'outsourcedArrive', (j.id || '') + '.' + (t.id || ''))));
     if (fixes.length) state.meta.weekendFixNotice = (state.meta.weekendFixNotice || []).concat(fixes);
-    return fixes.length;
+    return fixes.length || changed;
   }
   // After a shutdown is added or its dates change: move anything that now falls inside it, then refresh the schedule.
   function applyNonWorkingFix(){
@@ -2321,7 +2329,7 @@
     const ok = (x) => /^\d{4}-\d{2}-\d{2}$/.test(String(x)) && +String(x).slice(0, 4) >= 2000 && +String(x).slice(0, 4) <= 2100;
     const e = s.end || s.start;
     if (!ok(s.start) || !ok(e) || e < s.start) return false;
-    return (parseISO(e) - parseISO(s.start)) / 86400000 <= 400;
+    return (parseISO(e) - parseISO(s.start)) / 86400000 <= 120;
   }
   function shutdownOn(dateISO){
     return (state.shutdowns || []).find(s => shutdownValid(s) && dateISO >= s.start && dateISO <= (s.end || s.start)) || null;
