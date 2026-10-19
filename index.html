@@ -4310,10 +4310,10 @@
   // ---------- Schedule page layout: Compact view + foldable panels. The choices are remembered on this device. ----------
   const SCHED_UI_KEY = STORE_KEY + '.ui';
   const schedUI = (() => {
-    const d = { compact: true, collapsed: { move: true, ask: true, suggest: true } };
+    const d = { compact: true, chartMonths: 4, chartOffset: 0, collapsed: { move: true, ask: true, suggest: true } };
     try {
       const s = JSON.parse(localStorage.getItem(SCHED_UI_KEY) || 'null');
-      if (s && typeof s === 'object'){ d.compact = s.compact !== false; d.collapsed = Object.assign(d.collapsed, s.collapsed || {}); }
+      if (s && typeof s === 'object'){ d.compact = s.compact !== false; if (s.chartMonths !== undefined) d.chartMonths = Number(s.chartMonths) || 0; d.chartOffset = Math.max(0, Number(s.chartOffset) || 0); d.collapsed = Object.assign(d.collapsed, s.collapsed || {}); }
     } catch (e){}
     return d;
   })();
@@ -5349,7 +5349,32 @@ ${busyRows ? `<h2 style="font-size:14px;border:none">Jobs using the labour this 
     const scrollWrap = document.createElement('div');
     scrollWrap.className = 'gantt-scroll';
 
-    const days = dailyPoolUsage.map(d => d.date);
+    // Drawing every working day out to the last finish date (hundreds of columns x every job) made the page slow to scroll
+    // and click, so the chart shows a window (default the next 4 months) that can be widened or paged.
+    const allDays = dailyPoolUsage.map(d => d.date);
+    let winFrom = allDays[0] || '', winTo = allDays[allDays.length - 1] || '';
+    if (schedUI.chartMonths > 0 && allDays.length){
+      const a = parseISO(allDays[0]); a.setMonth(a.getMonth() + schedUI.chartOffset * schedUI.chartMonths); winFrom = toISO(a);
+      const z = parseISO(winFrom); z.setMonth(z.getMonth() + schedUI.chartMonths); winTo = toISO(z);
+    }
+    const days = schedUI.chartMonths > 0 ? allDays.filter(d => d >= winFrom && d < winTo) : allDays;
+    {
+      const bar = document.createElement('div'); bar.className = 'toolbar'; bar.style.cssText = 'margin:4px 0 8px;gap:8px;align-items:center';
+      const sel = document.createElement('select');
+      [[3, '3 months'], [4, '4 months'], [6, '6 months'], [12, '12 months'], [0, 'Everything (slow)']].forEach(([v, t]) => { const o = document.createElement('option'); o.value = v; o.textContent = t; if (v === schedUI.chartMonths) o.selected = true; sel.appendChild(o); });
+      sel.addEventListener('change', () => { schedUI.chartMonths = Number(sel.value) || 0; schedUI.chartOffset = 0; saveSchedUI(); renderResults(); });
+      const prev = document.createElement('button'); prev.className = 'ghost'; prev.textContent = '◀ Earlier'; prev.disabled = schedUI.chartMonths <= 0 || schedUI.chartOffset <= 0;
+      prev.addEventListener('click', () => { schedUI.chartOffset = Math.max(0, schedUI.chartOffset - 1); saveSchedUI(); renderResults(); });
+      const next = document.createElement('button'); next.className = 'ghost'; next.textContent = 'Later ▶';
+      const lastDay = allDays[allDays.length - 1] || '';
+      next.disabled = schedUI.chartMonths <= 0 || !lastDay || winTo > lastDay;
+      next.addEventListener('click', () => { schedUI.chartOffset++; saveSchedUI(); renderResults(); });
+      const info = document.createElement('span'); info.className = 'hint'; info.style.margin = '0';
+      info.textContent = days.length ? 'Showing ' + fmtShort(parseISO(days[0])) + ' – ' + fmtShort(parseISO(days[days.length - 1])) + (days.length < allDays.length ? ' of ' + allDays.length + ' working days (the schedule runs to ' + fmtShort(parseISO(lastDay)) + ' ' + parseISO(lastDay).getFullYear() + ')' : '') : 'Nothing in this window — press Earlier.';
+      const lbl = document.createElement('label'); lbl.style.minWidth = '0'; lbl.textContent = 'Chart shows';
+      [lbl, sel, prev, next, info].forEach(x => bar.appendChild(x));
+      ganttPanel.appendChild(bar);
+    }
     const table = document.createElement('table');
     table.className = 'gantt';
 
@@ -5485,7 +5510,7 @@ ${busyRows ? `<h2 style="font-size:14px;border:none">Jobs using the labour this 
         rh.innerHTML = `<div class="job">${p.name}</div><div class="cust">varies by weekday</div>`;
         tr.appendChild(rh);
 
-        dailyPoolUsage.forEach(day => {
+        dailyPoolUsage.filter(day => schedUI.chartMonths <= 0 || (day.date >= winFrom && day.date < winTo)).forEach(day => {
           const td = document.createElement('td'); td.className = 'cell util-cell' + (isShutdownDay(day.date) ? ' shutcell' : '');
           const used = day.usage[p.id] || 0;
           const cap = poolHoursOn(p, day.date);
