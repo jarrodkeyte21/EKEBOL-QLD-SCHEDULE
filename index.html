@@ -4242,7 +4242,9 @@
       const realTable = w.querySelector('table.gantt'); const ft = ganttFloat.querySelector('table');
       const real = realHead.querySelectorAll('th'), fake = ft.querySelectorAll('th');
       ft.style.width = realTable.offsetWidth + 'px';
-      real.forEach((th, i) => { if (fake[i]){ const wd = th.getBoundingClientRect().width + 'px'; fake[i].style.width = wd; fake[i].style.minWidth = wd; fake[i].style.maxWidth = wd; } });
+      // read every width first, then write: alternating read/write forced a full re-layout of the chart for EACH column
+      const widths = Array.from(real, th => th.getBoundingClientRect().width + 'px');
+      widths.forEach((wd, i) => { if (fake[i]){ fake[i].style.width = wd; fake[i].style.minWidth = wd; fake[i].style.maxWidth = wd; } });
       ganttFloatSynced = true;
     }
     ganttFloat.scrollLeft = w.scrollLeft;
@@ -4254,7 +4256,8 @@
       ganttFloat.id = 'ganttFloatHead';
       ganttFloat.style.cssText = 'position:fixed;top:0;z-index:30;overflow:hidden;display:none;background:var(--surface);box-shadow:0 3px 8px rgba(0,0,0,.28);pointer-events:none';
       document.body.appendChild(ganttFloat);
-      window.addEventListener('scroll', updateGanttFloat, { passive: true });
+      let floatRaf = 0; // at most one update per frame while scrolling
+      window.addEventListener('scroll', () => { if (floatRaf) return; floatRaf = requestAnimationFrame(() => { floatRaf = 0; updateGanttFloat(); }); }, { passive: true });
       window.addEventListener('resize', () => { ganttFloatSynced = false; updateGanttFloat(); });
     }
     const realHead = scrollWrap.querySelector('thead');
