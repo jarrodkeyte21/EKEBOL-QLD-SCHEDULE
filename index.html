@@ -160,7 +160,11 @@
   .drag-handle:hover { background: var(--surface-2); color: var(--ink); }
   table.matrix tbody tr.dragging, table.editor tbody tr.dragging, table.build-summary tbody tr.dragging, table.gantt-grid tbody tr.dragging, tr.dragging { opacity: 0.4; }
   table.matrix tbody tr.drag-over, table.editor tbody tr.drag-over, table.build-summary tbody tr.drag-over, tr.drag-over { box-shadow: inset 0 2px 0 var(--accent); background: var(--surface-2); }
-  table.build-summary .drag-handle { cursor: grab; display: inline-block; padding: 0 4px; }
+  table.build-summary .drag-handle { cursor: grab; display: inline-flex; vertical-align: middle; padding: 0 4px; width: auto; height: auto; }
+  /* the job number always sits right next to its drag dots, never wrapped underneath them */
+  table.build-summary td:has(> .drag-handle) { white-space: nowrap; }
+  table.gantt td.rowhead .job { display: flex; align-items: center; white-space: nowrap; max-width: 230px; overflow: hidden; }
+  table.gantt td.rowhead .job .drag-handle { flex: 0 0 auto; width: 20px; height: 20px; margin-right: 4px !important; }
   .tmpl-card.dragging { opacity: 0.4; }
   .tmpl-card.drag-over { box-shadow: 0 -2px 0 var(--accent); }
   .drag-handle-inline { display: inline-flex; margin-right: 6px; vertical-align: middle; }
