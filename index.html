@@ -1417,9 +1417,14 @@
     if (!build) return null;
     const result = runSchedule(buildId);
     const scheduled = result.builds.find(x => x.id === buildId);
-    if (!scheduled || !scheduled.startDate) return null;
+    // The first day ANY task of the job runs counts — including a task that goes out to a supplier (outsourced), which needs
+    // the order placed before it leaves. Using only the first in-house labour day made a job whose first task is outsourced
+    // get an order date a week or more too late, which then pushed the whole job out.
+    let firstDay = scheduled && scheduled.startDate;
+    ((scheduled && scheduled.allocations) || []).forEach(a => { if (!firstDay || a.date < firstDay) firstDay = a.date; });
+    if (!scheduled || !firstDay) return null;
     const days = Number(effectiveBuildData(build).leadDays) || 0;
-    let o = prevWorkingISO(toISO(addWorkingDays(parseISO(scheduled.startDate), -days)));
+    let o = prevWorkingISO(toISO(addWorkingDays(parseISO(firstDay), -days)));
     const mo = minOrderDate(build);
     if (mo && o < mo) o = mo; // never earlier than the build sheet release + its set time
     return o;
