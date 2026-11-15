@@ -465,8 +465,8 @@
 <div id="page-schedule">
   <div id="scheduleViewBar" class="toolbar" style="margin-bottom:10px;gap:14px;align-items:center">
     <label style="display:flex;gap:6px;align-items:center;cursor:pointer" title="Tighter rows and narrower date columns so more jobs fit on screen"><input type="checkbox" id="chkCompact"> Compact view</label>
-    <label style="display:flex;gap:6px;align-items:center" title="How each day's labour hours are shared between jobs that need the same pool">Labour goes to
-      <select id="selAllocMode"><option value="finish">the job closest to finishing first</option><option value="list">the job highest in the Builds list first</option></select></label>
+    <label style="display:flex;gap:6px;align-items:center" title="The Builds list order (drag and drop) is the main priority. A job that needs no more than this many labour hours to be complete gets first claim on those last hours, so near-finished jobs aren't left waiting behind big ones. 0 = follow the list strictly."><span>Finish first if</span>
+      <input type="number" id="inpQuickHours" min="0" step="4" style="width:64px"> <span>h or less left</span></label>
     <button class="ghost" id="btnFoldTools" title="Fold away Preview a move, Ask, Suggestions and the Builds editor so the summary and chart fill the page">Fold tools</button>
     <button class="ghost" id="btnUnfoldAll">Unfold all</button>
     <span class="hint" style="margin:0">Click a panel heading to fold or unfold it.</span>
@@ -2990,14 +2990,18 @@
           }
         }
 
-        // Who gets today's pool hours first. "Finish-first" (the default) hands each pool's hours to the job with the least
-        // labour left to do, so a job that can finish soonest is finished BEFORE labour is spread onto jobs that finish later,
-        // instead of hours bouncing between jobs by list position. "List order" gives the top job in the Builds list first claim.
-        const finishFirst = !(state.meta && state.meta.allocMode === 'list');
-        const allocOrder = finishFirst
-          ? builds.map((b, i) => ({ b, i, rem: b.tstates.reduce((s, t) => s + ((t.done || t.out) ? 0 : (Number(t.remaining) || 0)), 0) }))
-              .sort((x, y) => (x.rem - y.rem) || (x.i - y.i)).map(x => x.b)
-          : builds;
+        // Who gets today's pool hours first. The Builds list order (drag & drop) is always the main priority. On top of that,
+        // a job that only needs a few more labour hours to be COMPLETE (the "quick finish" limit, default 24h) is allowed to
+        // jump ahead of bigger jobs for those last hours, so near-finished jobs are cleared instead of waiting behind long
+        // jobs and being finished later. Set the limit to 0 to follow the list strictly.
+        const quickLimit = (state.meta && state.meta.quickHours !== undefined && state.meta.quickHours !== '') ? Math.max(0, Number(state.meta.quickHours) || 0) : 24;
+        let allocOrder = builds;
+        if (quickLimit > 0){
+          const remOf = (b) => b.tstates.reduce((s, t) => s + ((t.done || t.out) ? 0 : (Number(t.remaining) || 0)), 0);
+          const quick = [], rest = [];
+          builds.forEach((b, i) => { const r = remOf(b); if (r > 0.01 && r <= quickLimit) quick.push({ b, i, r }); else rest.push(b); });
+          if (quick.length) allocOrder = quick.sort((x, y) => (x.r - y.r) || (x.i - y.i)).map(x => x.b).concat(rest);
+        }
 
         let passAllocated = true;
         let guard = 0;
@@ -4342,8 +4346,8 @@
   })();
   function saveSchedUI(){ try { localStorage.setItem(SCHED_UI_KEY, JSON.stringify(schedUI)); } catch (e){} }
   function syncAllocModeSelect(){
-    const sel = document.getElementById('selAllocMode');
-    if (sel) sel.value = (state.meta && state.meta.allocMode === 'list') ? 'list' : 'finish';
+    const inp = document.getElementById('inpQuickHours');
+    if (inp && document.activeElement !== inp){ const v = state.meta && state.meta.quickHours; inp.value = (v === undefined || v === '' || v === null) ? 24 : v; }
   }
   function applySchedCompact(){
     document.body.classList.toggle('compact-schedule', !!schedUI.compact);
@@ -4402,8 +4406,8 @@
       schedUI.compact = chk.checked; saveSchedUI(); applySchedCompact();
       ganttFloatSynced = false; renderResults();
     });
-    const allocSel = document.getElementById('selAllocMode');
-    if (allocSel) allocSel.addEventListener('change', () => { if (!state.meta) state.meta = {}; state.meta.allocMode = allocSel.value; save(); renderAll(); });
+    const quickInp = document.getElementById('inpQuickHours');
+    if (quickInp) quickInp.addEventListener('change', () => { if (!state.meta) state.meta = {}; state.meta.quickHours = Math.max(0, Math.round(Number(quickInp.value) || 0)); quickInp.value = state.meta.quickHours; save(); renderAll(); });
     const fold = document.getElementById('btnFoldTools');
     if (fold) fold.addEventListener('click', () => { ['move', 'ask', 'suggest', 'builds'].forEach(k => { schedUI.collapsed[k] = true; }); saveSchedUI(); applyAllCollapsibles(); });
     const unfold = document.getElementById('btnUnfoldAll');
