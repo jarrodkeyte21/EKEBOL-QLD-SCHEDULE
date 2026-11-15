@@ -4377,6 +4377,106 @@
     });
   }
   // Notice listing any saved dates that had to move off a weekend (see normalizeState). Shown on the Schedule tab until dismissed.
+  // ---------- Outsourced items that are due back: on (or after) the date an outsourced component is expected, ask the user to
+  // confirm it has been received, or to enter the new date if it is delayed. A banner on the Schedule tab lists them, and the
+  // review window opens by itself once when the page loads. "Received" marks that task back (so what follows can start);
+  // "Delayed" moves its expected date. Only tasks with an expected-back DATE are covered (a "days away" task has no fixed date). ----------
+  function dueOutsourcedItems(){
+    const today = getTodayISO(); const items = [];
+    state.builds.forEach(b => {
+      if (b.archived || b.status === 'complete') return;
+      let info; try { info = effectiveOutsourcedInfo(b); } catch (e){ return; }
+      state.tasks.forEach(t => {
+        const cur = info[t.id]; if (!cur || !cur.arrive || cur.arrive > today) return;
+        if (b.outsourcedDone && b.outsourcedDone[t.id]) return;
+        const ov = b.percentByTask ? b.percentByTask[t.id] : undefined;
+        if (ov !== undefined && ov !== null && ov !== '' && Number(ov) >= 100) return;
+        items.push({ b, t, arrive: cur.arrive });
+      });
+    });
+    return items.sort((x, y) => (x.arrive < y.arrive ? -1 : x.arrive > y.arrive ? 1 : 0));
+  }
+  function outsourceAlertAllowed(){ return !(typeof currentProfile !== 'undefined' && currentProfile && currentProfile.role && currentProfile.role !== 'manager'); }
+  function markOutsourceReceived(item){
+    item.b.outsourcedDone = Object.assign({}, item.b.outsourcedDone || {}); item.b.outsourcedDone[item.t.id] = true;
+  }
+  function markOutsourceDelayed(item, newISO){
+    item.b.outsourcedArrive = Object.assign({}, item.b.outsourcedArrive || {}); item.b.outsourcedArrive[item.t.id] = newISO;
+    if (item.b.outsourcedDone) delete item.b.outsourcedDone[item.t.id];
+  }
+  function openOutsourceDueDialog(){
+    if (document.getElementById('outDueOverlay')) return;
+    const overlay = document.createElement('div'); overlay.id = 'outDueOverlay';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:9999;overflow:auto;padding:16px';
+    const box = document.createElement('div'); box.className = 'panel';
+    box.style.cssText = 'width:min(680px,100%);max-height:100%;overflow:auto;box-shadow:0 8px 30px rgba(0,0,0,.35)';
+    const close = () => { overlay.remove(); renderOutsourceAlert(); };
+    const draw = () => {
+      box.innerHTML = '';
+      const items = dueOutsourcedItems();
+      const h2 = document.createElement('h2'); h2.textContent = 'Outsourced items due back';
+      const hint = document.createElement('div'); hint.className = 'hint';
+      hint.textContent = 'These were expected back by now. Press Received once it is here, so the next process can start — or, if it is late, enter the new expected date and the schedule will move.';
+      box.appendChild(h2); box.appendChild(hint);
+      if (!items.length){
+        const none = document.createElement('div'); none.className = 'dep-empty'; none.style.marginTop = '10px'; none.textContent = 'Nothing is waiting for confirmation.'; box.appendChild(none);
+      }
+      items.forEach(it => {
+        const row = document.createElement('div'); row.className = 'field-row'; row.style.cssText = 'flex-wrap:wrap;gap:8px;align-items:center;border-top:1px solid var(--line);padding-top:8px';
+        const lbl = document.createElement('div'); lbl.style.cssText = 'min-width:220px;flex:1';
+        const b1 = document.createElement('b'); b1.textContent = jobDialogLabel(it.b);
+        const sub = document.createElement('div'); sub.className = 'hint'; sub.style.margin = '0';
+        sub.textContent = it.t.name + ' — due ' + fmtShort(parseISO(it.arrive)) + (it.arrive < getTodayISO() ? ' (overdue)' : ' (today)');
+        lbl.appendChild(b1); lbl.appendChild(sub);
+        const rec = document.createElement('button'); rec.className = 'primary'; rec.textContent = '✓ Received';
+        rec.addEventListener('click', () => { markOutsourceReceived(it); save(); renderAll(); draw(); });
+        const di = document.createElement('input'); di.type = 'date'; di.title = 'New expected date if it is delayed';
+        const later = document.createElement('button'); later.className = 'ghost'; later.textContent = 'Delayed — set date';
+        later.addEventListener('click', () => {
+          let v = di.value;
+          if (!v || !sensibleDateISO(v)){ appToast('Pick the new expected date first.'); return; }
+          if (v <= getTodayISO()){ appToast('Pick a date after today, or press Received if it is here.'); return; }
+          if (isNonWorkingISO(v)){ const w = nearestWorkingISO(v); appToast('Deliveries cannot arrive on ' + nonWorkingReason(v) + ' — moved to ' + fmtShort(parseISO(w))); v = w; if (v <= getTodayISO()) v = nextWorkingISO(toISO(addDays(parseISO(getTodayISO()), 1))); }
+          markOutsourceDelayed(it, v); save(); renderAll(); draw();
+        });
+        [lbl, rec, di, later].forEach(x => row.appendChild(x)); box.appendChild(row);
+      });
+      const bar = document.createElement('div'); bar.className = 'toolbar'; bar.style.marginTop = '12px';
+      if (items.length > 1){
+        const all = document.createElement('button'); all.className = 'ghost'; all.textContent = 'Mark all received';
+        all.addEventListener('click', () => { items.forEach(markOutsourceReceived); save(); renderAll(); draw(); });
+        bar.appendChild(all);
+      }
+      const later2 = document.createElement('button'); later2.className = 'ghost'; later2.textContent = items.length ? 'Ask me later' : 'Close';
+      later2.addEventListener('click', close); bar.appendChild(later2); box.appendChild(bar);
+    };
+    draw(); overlay.appendChild(box); overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    document.body.appendChild(overlay);
+  }
+  let outDuePrompted = false;
+  function renderOutsourceAlert(){
+    const page = document.getElementById('page-schedule'); if (!page) return;
+    let el = document.getElementById('outsourceDueAlert');
+    const items = outsourceAlertAllowed() ? dueOutsourcedItems() : [];
+    if (!items.length){ if (el) el.remove(); return; }
+    if (!el){
+      el = document.createElement('div'); el.id = 'outsourceDueAlert';
+      el.style.cssText = 'border:1px solid var(--critical);background:color-mix(in srgb, var(--critical) 10%, var(--surface));border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:13px;display:flex;gap:10px;align-items:center;justify-content:space-between';
+      const bar = document.getElementById('scheduleViewBar');
+      if (bar && bar.nextSibling) page.insertBefore(el, bar.nextSibling); else page.insertBefore(el, page.firstChild);
+    }
+    el.innerHTML = '';
+    const t = document.createElement('b'); t.textContent = '📦 ' + items.length + ' outsourced item' + (items.length > 1 ? 's are' : ' is') + ' due back — confirm received or enter a new date: '
+      + items.slice(0, 3).map(i => shortJobName(i.b) + ' ' + i.t.name).join(', ') + (items.length > 3 ? ' …' : '');
+    const btn = document.createElement('button'); btn.className = 'primary'; btn.textContent = 'Review';
+    btn.addEventListener('click', openOutsourceDueDialog);
+    el.appendChild(t); el.appendChild(btn);
+    if (!outDuePrompted && !document.getElementById('outDueOverlay')){
+      outDuePrompted = true;
+      setTimeout(() => { if (!document.getElementById('outDueOverlay') && dueOutsourcedItems().length) openOutsourceDueDialog(); }, 700);
+    }
+  }
+
   function renderWeekendNotice(){
     const page = document.getElementById('page-schedule'); if (!page) return;
     let el = document.getElementById('weekendNotice');
@@ -5605,6 +5705,7 @@ ${busyRows ? `<h2 style="font-size:14px;border:none">Jobs using the labour this 
     renderMoveBuildPreviewPanel();
     renderPlanPanel();
     syncAllocModeSelect();
+    renderOutsourceAlert();
   }
 
   // ---------- render: job history — every build that has ever existed, active or removed from Build summary,
