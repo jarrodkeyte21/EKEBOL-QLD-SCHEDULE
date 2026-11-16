@@ -813,13 +813,16 @@
   // items get reassigned, so the two lists agree on order without disturbing anything unrelated.
   // Drag-to-reschedule: a build's position in state.builds IS its priority (top gets pool hours first each day),
   // so dragging a row in the schedule / build summary onto another row reorders them and the schedule re-runs.
-  function moveBuild(fromId, toId){
+  // The job lands directly in front of the one it is dropped on (or directly behind it when `after` is set, i.e. it was
+  // dragged DOWN the list on screen). The list on screen can be in a different order from the real priority list (Build
+  // summary is grouped by dispatch date), so the position is worked out from the target's real place, not an array index.
+  function moveBuild(fromId, toId, after){
     if (!fromId || fromId === toId) return;
     const fromIdx = state.builds.findIndex(x => x.id === fromId);
-    const toIdx = state.builds.findIndex(x => x.id === toId);
-    if (fromIdx === -1 || toIdx === -1) return;
+    if (fromIdx === -1 || state.builds.findIndex(x => x.id === toId) === -1) return;
     const [moved] = state.builds.splice(fromIdx, 1);
-    state.builds.splice(toIdx, 0, moved);
+    const toIdx = state.builds.findIndex(x => x.id === toId);
+    state.builds.splice(after ? toIdx + 1 : toIdx, 0, moved);
     syncJobOrderFromBuilds();
     save(); renderAll();
   }
@@ -1282,6 +1285,7 @@
     handle.title = 'Drag onto another job to reschedule — higher up gets pool hours first';
     handle.style.marginRight = '6px';
     handle.draggable = true;
+    tr.dataset.buildId = buildId;
     handle.addEventListener('dragstart', (e) => {
       e.dataTransfer.effectAllowed = 'move';
       e.dataTransfer.setData('text/plain', buildId);
@@ -1299,7 +1303,13 @@
     tr.addEventListener('dragleave', () => tr.classList.remove('drag-over'));
     tr.addEventListener('drop', (e) => {
       e.preventDefault(); tr.classList.remove('drag-over');
-      moveBuild(e.dataTransfer.getData('text/plain'), buildId);
+      const fromId = e.dataTransfer.getData('text/plain');
+      // Dragged down the list on screen -> go behind the target; dragged up -> go in front of it.
+      let after = false;
+      const table = tr.closest('table');
+      const src = table ? table.querySelector('tr[data-build-id="' + String(fromId).replace(/"/g, '') + '"]') : null;
+      if (src && src !== tr) after = !!(src.compareDocumentPosition(tr) & Node.DOCUMENT_POSITION_FOLLOWING);
+      moveBuild(fromId, buildId, after);
     });
   }
   function syncJobOrderFromBuilds(){
